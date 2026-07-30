@@ -1,0 +1,26 @@
+{
+  "name": "claude-free-bridge",
+  "version": "0.1.0",
+  "description": "MVP scaffold for Claude Free Bridge (agentic CLI)",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+      "dev": "ts-node src/index.ts",
+      "integration": "node integration-runner.js"
+    },
+  "bin": {
+    "claude-free-bridge": "dist/index.js"
+  },
+  "dependencies": {
+    "commander": "^11.0.0",
+    "undici": "^6.0.0",
+    "diff-match-patch": "^1.0.5",
+    "playwright": "^1.35.0"
+  },
+  "devDependencies": {
+    "ts-node": "^10.9.1",
+    "typescript": "^5.5.0",
+    "@types/node": "^20.0.0"
+  }
+}
