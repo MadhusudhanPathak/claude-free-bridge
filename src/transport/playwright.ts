@@ -59,7 +59,7 @@ export async function sendPromptViaPlaywright(prompt: string, opts: { headed?: b
           ctxOpts = getContextOptionsFromStoredAuth();
         } else {
           // Non-auth error - ignore here
-          debug('Non-auth error during auth validation', e?.message ?? e);
+          debug('Non-auth error during auth validation', (e as any)?.message ?? e);
         }
       }
     }
@@ -142,7 +142,7 @@ export async function sendPromptViaPlaywright(prompt: string, opts: { headed?: b
               const created = new Date(lastAssistant.created_at).getTime();
               if (created >= startTimeMs - 5000) {
                 // Extract text content (conservative)
-                const parts = (lastAssistant.content || []).map(c => c.text || c.input || '');
+                const parts = (lastAssistant.content || []).map((c: any) => c.text || c.input || '');
                 const text = parts.join(' ');
                 if (text && text.length > 0) {
                   const cleaned = stripFences(text);
@@ -173,7 +173,7 @@ export async function sendPromptViaPlaywright(prompt: string, opts: { headed?: b
             }
 
           } catch (e) {
-            debug('API-driven polling error', e?.message ?? e);
+            debug('API-driven polling error', (e as any)?.message ?? e);
             throw e; // bubble up so caller can handle auth errors
           }
           await page.waitForTimeout(pollInterval);

@@ -18,66 +18,6 @@ export function hasStoredAuth(): boolean {
   return fs.existsSync(AUTH_PATH);
 }
 
-/**
- * Improved ensureAuth:
- * - Launches a persistent profile so cookies/localStorage persist
- * - Waits for /chat navigation (configurable timeout)
- * - Saves storageState to auth.json
- */
-export async function ensureAuth(headed = true, timeoutMs = 0): Promise<void> {
-  if (hasStoredAuth()) {
-    console.log('Auth storage already exists at', AUTH_PATH);
-    return;
-  }
-
-  if (!fs.existsSync(CONFIG_DIR)) fs.mkdirSync(CONFIG_DIR, { recursive: true });
-  if (!fs.existsSync(PROFILE_DIR)) fs.mkdirSync(PROFILE_DIR, { recursive: true });
-
-  console.log('Launching persistent browser for interactive login (profile at', PROFILE_DIR, ')');
-  const context = await chromium.launchPersistentContext(PROFILE_DIR, { headless: !headed });
-  const page = await context.newPage();
-  try {
-    await page.goto('https://claude.ai', { timeout: 60000 }).catch(() => {});
-    console.log('Complete login in the opened browser. Waiting for /chat...');
-
-    const max = timeoutMs && timeoutMs > 0 ? timeoutMs : 5 * 60 * 1000;
-    let elapsed = 0;
-    const interval = 2000;
-    while (elapsed < max) {
-      try {
-        const url = page.url();
-        if (url && url.includes('/chat')) break;
-      } catch (e) {}
-      await new Promise((r) => setTimeout(r, interval));
-      elapsed += interval;
-    }
-
-    // Save storage state to file
-    try {
-      const storage = await context.storageState();
-      fs.writeFileSync(AUTH_PATH, JSON.stringify(storage), { encoding: 'utf8' });
-      console.log('Saved storageState to', AUTH_PATH);
-    } catch (e) {
-      console.warn('Failed to write storageState:', (e as any)?.message ?? e);
-    }
-
-    // Try to auto-discover and persist the active org id
-    try {
-      const last = await getLastActiveOrg();
-      if (last) {
-        // lazy import to avoid cycle
-        const { addKnownOrg } = await import('./org_store');
-        await addKnownOrg(last);
-        console.log('Discovered and recorded org:', last);
-      }
-    } catch (e) {
-      // non-fatal
-    }
-  } finally {
-    try { await page.close(); } catch {}
-    try { await context.close(); } catch {}
-  }
-}
 
 export function getContextOptionsFromStoredAuth(): BrowserContextOptions | undefined {
   if (!hasStoredAuth()) return undefined;
