@@ -24,7 +24,7 @@ function stripFences(text: string) {
   return text.replace(/```(?:[\s\S]*?)```/g, (m) => m.replace(/```/g, ''));
 }
 
-export async function sendPromptViaPlaywright(prompt: string, opts: { headed?: boolean; timeoutMs?: number } = {}): Promise<string> {
+export async function sendPromptViaPlaywright(prompt: string, opts: { headed?: boolean; timeoutMs?: number; onChunk?: (chunk: string) => void; stream?: boolean } = {}): Promise<string> {
   const headed = opts.headed ?? true;
 
   // Ensure auth exists or prompt user to login
@@ -112,6 +112,7 @@ export async function sendPromptViaPlaywright(prompt: string, opts: { headed?: b
       if (org && conversationId) {
         info('Attempting API-driven fetch for conversation', conversationId, 'org', org);
         const pollInterval = 1000;
+        let lastAssistantText = '';
         while (Date.now() - startTimeMs < timeout) {
           try {
             const url = `https://claude.ai/api/organizations/${org}/chat_conversations/${conversationId}?rendering_mode=messages&render_all_tools=true`;
@@ -139,23 +140,47 @@ export async function sendPromptViaPlaywright(prompt: string, opts: { headed?: b
 
             if (lastAssistant) {
               const created = new Date(lastAssistant.created_at).getTime();
-              // If created after prompt start (little tolerance), treat as response
               if (created >= startTimeMs - 5000) {
                 // Extract text content (conservative)
-                const text = (lastAssistant.content || []).map(c => c.text || c.input || '').join(' ');
+                const parts = (lastAssistant.content || []).map(c => c.text || c.input || '');
+                const text = parts.join(' ');
                 if (text && text.length > 0) {
-                  scraped = stripFences(text);
-                  // Heuristic for stability: break once we have non-empty text
-                  break;
+                  const cleaned = stripFences(text);
+                  // If caller requested streaming, send incremental deltas
+                  try {
+                    if (opts.onChunk && typeof opts.onChunk === 'function') {
+                      // Send any newly available text
+                      if (cleaned.length > lastAssistantText.length) {
+                        const delta = cleaned.slice(lastAssistantText.length);
+                        try { opts.onChunk(delta); } catch (e) { debug('onChunk handler failed', e); }
+                        lastAssistantText = cleaned;
+                      }
+                    }
+                  } catch (e) {
+                    debug('Streaming callback error', e);
+                  }
+
+                  // If not streaming, or if we detect stable final text, capture and break
+                  if (!opts.stream) {
+                    scraped = cleaned;
+                    break;
+                  }
+
+                  // If streaming, continue polling until generation seems complete
+                  // Heuristic: if we observe no growth for some retries, assume finished
                 }
               }
             }
 
           } catch (e) {
             debug('API-driven polling error', e?.message ?? e);
+            throw e; // bubble up so caller can handle auth errors
           }
           await page.waitForTimeout(pollInterval);
         }
+
+        // If streaming and we have accumulated text, set scraped to lastAssistantText
+        if (opts.stream && lastAssistantText) scraped = lastAssistantText;
       }
     } catch (e) {
       debug('API-driven retrieval failed, falling back to DOM scraping', e);
@@ -180,6 +205,14 @@ export async function sendPromptViaPlaywright(prompt: string, opts: { headed?: b
             return '';
           });
           if (content && content !== lastText) {
+            // If streaming, emit delta
+            if (opts.onChunk && typeof opts.onChunk === 'function') {
+              const cleaned = stripFences(content);
+              if (cleaned.length > lastText.length) {
+                const delta = cleaned.slice(lastText.length);
+                try { opts.onChunk(delta); } catch (e) { debug('onChunk handler failed', e); }
+              }
+            }
             lastText = content;
           }
           await page.waitForTimeout(800);

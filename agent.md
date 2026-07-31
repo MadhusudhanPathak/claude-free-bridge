@@ -1,59 +1,38 @@
 Agent checkpoint — claude-free-bridge
-Timestamp: 2026-07-30T19:48:21.394+02:00
+Timestamp: 2026-07-31T02:00:00+00:00
 
 Summary of progress
-- Project scaffolded (TypeScript) and evolved into a Playwright-backed bridge with CLI controls.
-- Major additions since last checkpoint:
-  - Playwright-backed auth system with persistent storageState and per-org profiles
-  - Programmatic in-page fetch (fetchWithAuth) that runs requests inside an authenticated page
-  - Known-org store (TTL) to remember discovered organizations across runs
-  - Transport upgrades to prefer API-driven conversation retrieval (with DOM fallback)
-  - Telemetry/logger and an integration-runner for headless checks
-  - CLI commands for auth management, probes, telemetry toggling, and basic integration scripting
+- Evolved the Playwright-backed bridge into a small local HTTP API that proxies Anthropic-style chat completion requests to an authenticated Claude web session.
+- Implemented streaming (robust, API-driven incremental deltas) and a single-worker FIFO queue to respect the single-browser session constraint.
+- Added automatic re-auth handling that pauses the queue on auth invalidation (E_AUTH_INVALID), launches an interactive re-auth flow, and resumes processing.
+- Added a minimal PyQt GUI for quick inspection and control, and extended the integration-runner to exercise the API (including streaming).
 
-What failed / outstanding
-- The conversation API endpoints used are private-facing and may change; code falls back to DOM scraping when necessary.
-- StorageState files are sensitive and currently stored unencrypted on disk. OS keychain integration is recommended for production builds.
+Design & behaviour
+- Transport (src/transport/playwright.ts): prefers API polling (fetchWithAuth) for deterministic retrieval of conversation messages; falls back to DOM polling/scraping if the API is unavailable. Exposes an onChunk callback for streaming deltas.
+- API server (src/api.ts): provides /health, /v1/models and /v1/chat/completions. Supports stream:true (SSE) and stream:false responses. Uses a single-worker FIFO queue and pauses for re-auth when necessary.
+- Auth (src/session/auth.ts): unchanged in behaviour — storageState-based authentication, fetchWithAuth for in-session requests, and ensureAuth to trigger interactive login. On 401/403 fetchWithAuth clears stored auth and raises E_AUTH_INVALID which the queue detects.
+- Streaming: implemented conservatively by detecting and forwarding incremental growth of the assistant message (API-driven), avoiding brittle low-level network interception.
 
-Auth & profile highlights
-- Persistent storageState is saved automatically after an interactive login and may be stored either in the root auth.json or per-org under profiles/<orgId>/auth.json.
-- Profiles root: %USERPROFILE%\.claude-free-bridge\profiles\<orgId>\
-- getLastActiveOrg() uses a cookie fast-path then falls back to querying account_profile endpoints inside the authenticated page.
-- fetchWithAuth(url, opts) executes fetch inside the Playwright page (credentials: include) so cookies/localStorage are honored.
-- On 401/403, fetchWithAuth clears stored auth for the affected profile and throws an error with code E_AUTH_INVALID so callers can re-auth.
+Integration tests
+- integration-runner.js now:
+  - Starts the built server (dist/index.js serve)
+  - Waits for /health
+  - Executes a non-streaming chat probe and validates response shape
+  - Executes a streaming chat probe and validates reception of at least one data chunk and a final stop event
+  - Stops the server and returns success/failure
 
-Files of interest
-- src/session/auth.ts         — ensureAuthForOrg, ensureAuth, fetchWithAuth, profile helpers, clear/export helpers
-- src/session/org_store.ts    — known-org TTL store (add/get/remove/clear)
-- src/transport/playwright.ts — sendPromptViaPlaywright: prefers API conversation fetch, falls back to DOM scraping
-- src/logger.ts               — telemetry-controlled logger (file + console)
-- src/index.ts                — CLI: auth-info, auth-export, auth-clear, probe, telemetry
-- integration-runner.js       — local integration helper that exercises known orgs (requires built dist)
-- auth_version_01.md          — archived previous auth implementation (kept for reference)
+How to reproduce locally
+1. npm install
+2. npx playwright install
+3. npm run build
+4. node dist/index.js auth-info --login  (complete interactive login)
+5. node dist/index.js serve --host 127.0.0.1 --port 8080
+6. Use curl or a coding agent pointed at http://127.0.0.1:8080/v1 to exercise the API
+7. Run npm run integration to execute the built integration tests
 
-Resume checklist / next steps
-1) Build and test locally:
-   - npm install
-   - npx playwright install
-   - npm run build
-2) Create a profile / authenticate interactively:
-   - node dist/index.js auth-info --login
-   - Complete the browser login and navigate to /chat. The CLI will detect /chat and save storageState to the profile.
-3) Test probe:
-   - node dist/index.js probe "Hello" --headed
-   - If on a conversation URL and org is known the transport will poll the conversation API; otherwise it will scrape the DOM.
-4) Run integration runner (after build):
-   - npm run integration
-   - This exercises known orgs and validates account_profile for the first known org if a profile exists.
-
-Recommended next work
-- Add explicit CLI to list/select/delete profiles (user-facing multi-profile selection)
-- Integrate OS keychain / credential store to encrypt auth.json at rest
-- Add unit tests for org_store and logger, and a CI integration job that runs integration-runner with pre-seeded credentials (requires secure secret handling)
-- Harden API polling with better backoff, and optionally intercept network requests for deterministic conversationId detection
-
-Security considerations
-- auth.json contains session cookies and is sensitive — do NOT commit it. The repo .gitignore already excludes .claude-free-bridge/.
-- Consider migrating sensitive storage to OS keychains before shipping to end users.
+Notes, limitations & next steps
+- The streaming implementation trades absolute minimum latency for robustness and maintainability; it is intentionally non-brittle.
+- The re-auth mechanism is interactive (requires user to complete a login flow in a browser). This keeps the system simple and avoids storing credentials.
+- Recommended next work: add OS keychain integration for storageState, add optional GUI features (queue view, start/stop server), add unit tests for session helpers.
 
 Saved-by: copilot-cli

@@ -3,6 +3,7 @@ import { agentLoop } from './orchestrator/loop';
 import { getLastActiveOrg, fetchWithAuth, ensureAuth } from './session/auth';
 import { sendPromptViaPlaywright } from './transport/playwright';
 import { enableTelemetry } from './logger';
+import { startServer } from './api';
 
 const pkg = require('../package.json');
 const program = new Command();
@@ -118,6 +119,17 @@ program
     } else {
       console.log('Specify --on or --off');
     }
+  });
+
+program
+  .command('serve')
+  .description('Start HTTP API server (Anthropic-compatible endpoints)')
+  .option('--host <host>', 'Host to bind', '127.0.0.1')
+  .option('--port <port>', 'Port to bind', '8080')
+  .action((opts: any) => {
+    const port = parseInt(opts.port, 10) || 8080;
+    const host = opts.host || '127.0.0.1';
+    startServer({ host, port });
   });
 
 program.parseAsync(process.argv).catch((e) => {
