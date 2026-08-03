@@ -1,36 +1,41 @@
 import { exec } from 'child_process';
 import * as util from 'util';
-import * as path from 'path';
-const execP = util.promisify(exec);
 
-const DENYLIST = [
-  'rm -rf /',
-  'mkfs',
-  'dd if=',
-  'curl .*\|.*bash',
-  'shutdown',
-  'reboot',
-];
+const execAsync = util.promisify(exec);
 
-function isDangerous(cmd: string) {
-  const low = cmd.toLowerCase();
-  return DENYLIST.some((p) => {
-    try { const re = new RegExp(p); return re.test(low); } catch { return low.includes(p); }
+const DEFAULT_TIMEOUT_MS = 30000;
+
+const DENYLIST = ['rm -rf /', 'mkfs', 'dd if=', String.raw`curl .*\|.*bash`, 'shutdown', 'reboot'];
+
+export interface RunShellOptions {
+  yes?: boolean;
+  timeout?: number;
+}
+
+export type ShellResult =
+  | { ok: true; exit_code: 0; stdout: string; stderr: string }
+  | { ok: false; error: string; stdout?: string; stderr?: string; exit_code?: number };
+
+function isDangerous(command: string): boolean {
+  const lower = command.toLowerCase();
+  return DENYLIST.some((pattern) => {
+    try {
+      return new RegExp(pattern).test(lower);
+    } catch {
+      return lower.includes(pattern);
+    }
   });
 }
 
-export async function runShellCommand(command: string, workspace = '.', opts: any = {}): Promise<any> {
-  if (!command || command.trim().length === 0) return { ok: false, error: 'empty_command' };
-  if (isDangerous(command) && !opts.yes) {
-    return { ok: false, error: 'destructive_command_requires_confirmation' };
-  }
+export async function runShellCommand(command: string, workspace = '.', opts: RunShellOptions = {}): Promise<ShellResult> {
+  if (!command || !command.trim()) return { ok: false, error: 'empty_command' };
+  if (isDangerous(command) && !opts.yes) return { ok: false, error: 'destructive_command_requires_confirmation' };
+
   try {
-    const cwd = workspace;
-    const timeout = opts.timeout || 30000;
-    const res = await execP(command, { cwd, timeout });
-    return { ok: true, exit_code: 0, stdout: res.stdout, stderr: res.stderr };
-  } catch (err: any) {
-    // child_process exec throws on non-zero exit; capture output if present
-    return { ok: false, error: err?.message ?? String(err), stdout: err?.stdout ?? '', stderr: err?.stderr ?? '', exit_code: err?.code ?? 1 };
+    const { stdout, stderr } = await execAsync(command, { cwd: workspace, timeout: opts.timeout || DEFAULT_TIMEOUT_MS });
+    return { ok: true, exit_code: 0, stdout, stderr };
+  } catch (err) {
+    const e = err as { message?: string; stdout?: string; stderr?: string; code?: number };
+    return { ok: false, error: e.message ?? String(err), stdout: e.stdout ?? '', stderr: e.stderr ?? '', exit_code: e.code ?? 1 };
   }
 }

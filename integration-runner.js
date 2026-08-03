@@ -7,7 +7,7 @@ const http = require('http');
 
 const distRoot = path.join(__dirname, 'dist');
 const distAuth = path.join(distRoot, 'session', 'auth.js');
-const distOrg = path.join(distRoot, 'session', 'org_store.js');
+const distOrg = path.join(distRoot, 'session', 'orgStore.js');
 const distIndex = path.join(distRoot, 'index.js');
 
 if (!fs.existsSync(distAuth) || !fs.existsSync(distOrg) || !fs.existsSync(distIndex)) {

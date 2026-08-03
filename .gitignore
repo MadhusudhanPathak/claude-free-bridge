@@ -8,16 +8,20 @@ node_modules/
 
 # Build outputs
 dist/
+*.tsbuildinfo
 *.png
 *.log
+*.bak
 
 # Editor and OS files
 .vscode/
 .idea/
 .DS_Store
+Thumbs.db
 
 # Environment / secret files
 .env
+.env.*
 *.pem
 *.key
 *.secret
@@ -26,4 +30,4 @@ dist/
 coverage/
 
 # npm debug
-npm-debug.log
+npm-debug.log*

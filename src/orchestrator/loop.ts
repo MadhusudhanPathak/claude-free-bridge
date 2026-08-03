@@ -2,46 +2,45 @@ import { sendPromptViaPlaywright } from '../transport/playwright';
 import { parseToolUses } from '../parser/xml';
 import { executeTool } from '../tools/registry';
 import { ContextComposer } from './context';
-import { initPersistence, createConversation, appendMessage } from '../db/sqlite';
+import { appendMessage, createConversation, initPersistence } from '../db/sqlite';
+import { info } from '../logger';
 
-export async function agentLoop(task: string, opts: { workspace?: string; yes?: boolean } = {}) {
-  console.log('Agent loop started. Task:', task);
+export interface AgentLoopOptions {
+  workspace?: string;
+  yes?: boolean;
+}
+
+export async function agentLoop(task: string, opts: AgentLoopOptions = {}): Promise<void> {
+  info('Agent loop started. Task:', task);
   const workspace = opts.workspace ?? '.';
 
   const store = await initPersistence();
-  const convoId = `local-${Date.now()}`;
-  await createConversation(store, convoId, task);
+  const conversationId = `local-${Date.now()}`;
+  await createConversation(store, conversationId, task);
 
-  const ctx = new ContextComposer({ maxTurns: 12 });
-  ctx.addSystemMessage('System: Claude-Free-Bridge');
-  ctx.addUserMessage(task);
-  await appendMessage(store, convoId, 'user', task);
+  const context = new ContextComposer({ maxTurns: 12 });
+  context.addSystemMessage('System: Claude-Free-Bridge');
+  context.addUserMessage(task);
+  await appendMessage(store, conversationId, 'user', task);
 
-  // Build prompt from context
-  const prompt = ctx.getContext();
+  const response = await sendPromptViaPlaywright(context.getContext());
+  info('Assistant response (scraped):', response);
+  context.addAssistantMessage(response);
+  await appendMessage(store, conversationId, 'assistant', response);
 
-  // Send prompt and get a scraped response
-  const response = await sendPromptViaPlaywright(prompt);
-  console.log('Assistant response (scraped):');
-  console.log(response);
-  ctx.addAssistantMessage(response);
-  await appendMessage(store, convoId, 'assistant', response);
-
-  // Parse for tool uses
   const tools = parseToolUses(response);
   if (tools.length === 0) {
-    console.log('No tool_use blocks found. Done.');
+    info('No tool_use blocks found. Done.');
     return;
   }
 
-  // Execute sequentially using registry
-  for (const t of tools) {
-    console.log('Executing tool:', t.tool_name, t.parameters || {});
-    const result = await executeTool(t, workspace, { yes: !!opts.yes });
-    console.log('Tool result:', JSON.stringify(result, null, 2));
-    ctx.addToolResult(JSON.stringify(result));
-    await appendMessage(store, convoId, 'tool', JSON.stringify(result));
+  // MVP: execute tool calls sequentially and stop after one pass (no follow-up turn).
+  for (const tool of tools) {
+    info('Executing tool:', tool.tool_name, tool.parameters);
+    const result = await executeTool(tool, workspace, { yes: !!opts.yes });
+    info('Tool result:', result);
+    const resultJson = JSON.stringify(result);
+    context.addToolResult(resultJson);
+    await appendMessage(store, conversationId, 'tool', resultJson);
   }
-
-  // Optionally send tool results back and continue loop (MVP: single iteration)
 }

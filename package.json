@@ -6,16 +6,14 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
-      "dev": "ts-node src/index.ts",
-      "integration": "node integration-runner.js"
-    },
+    "dev": "ts-node src/index.ts",
+    "integration": "node integration-runner.js"
+  },
   "bin": {
     "claude-free-bridge": "dist/index.js"
   },
   "dependencies": {
     "commander": "^11.0.0",
-    "undici": "^6.0.0",
-    "diff-match-patch": "^1.0.5",
     "playwright": "^1.35.0"
   },
   "devDependencies": {
