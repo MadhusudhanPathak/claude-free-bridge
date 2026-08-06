@@ -7,6 +7,8 @@ import {
   getContextOptionsFromStoredAuth,
   getLastActiveOrg,
 } from '../session/auth';
+import { detectInstalledBrowsers } from '../session/browsers';
+import { applyStealth, STEALTH_IGNORE_DEFAULT_ARGS, STEALTH_LAUNCH_ARGS } from '../session/stealth';
 import { debug, info, warn } from '../logger';
 
 export interface SendPromptOptions {
@@ -213,12 +215,36 @@ async function scrapeViaDom(page: Page, opts: SendPromptOptions, timeoutMs: numb
   return stripFences(finalText || lastText || '');
 }
 
+async function launchTransportBrowser(headed: boolean) {
+  // Prefer a real installed browser channel over Playwright's bundled Chromium — the bundled
+  // build is the one most likely to be flagged by Cloudflare's bot-detection.
+  const installed = detectInstalledBrowsers().find((b) => b.kind !== 'bundled');
+  const stealthOptions = {
+    headless: !headed,
+    args: STEALTH_LAUNCH_ARGS,
+    ignoreDefaultArgs: STEALTH_IGNORE_DEFAULT_ARGS,
+  };
+
+  try {
+    if (installed?.kind === 'channel') {
+      return await chromium.launch({ ...stealthOptions, channel: installed.value });
+    }
+    if (installed?.kind === 'executablePath') {
+      return await chromium.launch({ ...stealthOptions, executablePath: installed.value });
+    }
+  } catch (e) {
+    warn(`Failed to launch "${installed?.label}" (${(e as Error)?.message ?? e}); falling back to bundled Chromium`);
+  }
+  return chromium.launch(stealthOptions);
+}
+
 export async function sendPromptViaPlaywright(prompt: string, opts: SendPromptOptions = {}): Promise<string> {
   const headed = opts.headed ?? true;
   const contextOptions = await ensureAuthenticatedContext(headed);
 
-  const browser = await chromium.launch({ headless: !headed });
+  const browser = await launchTransportBrowser(headed);
   const context = contextOptions ? await browser.newContext(contextOptions) : await browser.newContext();
+  await applyStealth(context);
   const page = await context.newPage();
 
   try {

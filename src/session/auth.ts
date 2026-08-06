@@ -5,6 +5,7 @@ import { AUTH_PATH, CONFIG_DIR, PROFILE_DIR, PROFILES_ROOT } from '../config/pat
 import { info, warn } from '../logger';
 import { addKnownOrg } from './orgStore';
 import { detectInstalledBrowsers } from './browsers';
+import { applyStealth, STEALTH_IGNORE_DEFAULT_ARGS, STEALTH_LAUNCH_ARGS } from './stealth';
 
 // A realistic desktop Chrome UA sent on every direct HTTP request, so requests look like
 // they come from a normal browser tab rather than a script.
@@ -147,17 +148,26 @@ async function launchLoginBrowser(profileDir: string, headed: boolean, browserId
   const chosen = detected.find((b) => b.id === browserId) || detected[0];
   info('Using browser:', chosen.label);
 
+  const stealthOptions = {
+    headless: !headed,
+    args: STEALTH_LAUNCH_ARGS,
+    ignoreDefaultArgs: STEALTH_IGNORE_DEFAULT_ARGS,
+    // null viewport makes a headed browser use its actual window size instead of Playwright's
+    // fixed 1280x720 default, which is itself a detectable automation fingerprint.
+    viewport: headed ? null : undefined,
+  };
+
   try {
     if (chosen.kind === 'channel') {
-      return await chromium.launchPersistentContext(profileDir, { headless: !headed, channel: chosen.value });
+      return await chromium.launchPersistentContext(profileDir, { ...stealthOptions, channel: chosen.value });
     }
     if (chosen.kind === 'executablePath') {
-      return await chromium.launchPersistentContext(profileDir, { headless: !headed, executablePath: chosen.value });
+      return await chromium.launchPersistentContext(profileDir, { ...stealthOptions, executablePath: chosen.value });
     }
   } catch (e) {
     warn(`Failed to launch "${chosen.label}" (${(e as Error)?.message ?? e}); falling back to bundled Chromium`);
   }
-  return chromium.launchPersistentContext(profileDir, { headless: !headed });
+  return chromium.launchPersistentContext(profileDir, stealthOptions);
 }
 
 /**
@@ -177,6 +187,7 @@ export async function ensureAuthForOrg(orgId?: string, headed = true, timeoutMs 
   if (!fs.existsSync(profileDir)) fs.mkdirSync(profileDir, { recursive: true });
 
   const context = await launchLoginBrowser(profileDir, headed, browserId);
+  await applyStealth(context);
   const page = await context.newPage();
   try {
     await page.goto('https://claude.ai', { timeout: 60000 }).catch((e) => {
