@@ -61,7 +61,7 @@ async function waitForServer(url, timeoutMs = 30000) {
     // Basic auth presence check
     const hasAuth = typeof auth.hasStoredAuth === 'function' ? await auth.hasStoredAuth() : false;
     if (!hasAuth) {
-      console.warn('No stored auth detected. To run full API tests, run auth-info --login to create a profile. Skipping API probes.');
+      console.warn('No stored auth detected. To run full API tests, run auth-set-session or auth-import-browser first. Skipping API probes.');
       serverProc.kill();
       process.exit(0);
     }

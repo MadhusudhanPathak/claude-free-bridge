@@ -39,37 +39,64 @@ npm run build
 
 ## Authentication
 
-Two ways to authenticate, depending on whether claude.ai's bot-detection challenges you:
+Sessions are stored as named **accounts** (`session/accounts.ts`), so you can hold several
+claude.ai logins side by side and switch between them. There are three ways to get a session
+into an account:
 
-### 1. Interactive login (default)
+### 1. Interactive login (primary)
 
-```bash
-node dist/index.js auth-info --login
-```
-
-This detects browsers installed on your machine (Chrome, Edge, Brave, or falls back to
-Playwright's bundled Chromium) and lets you pick one. It opens that browser, you log in
-normally, and the session is captured automatically the moment login completes — no manual
-steps beyond logging in.
+Opens a real browser window, you log into claude.ai normally, and the session is captured
+automatically the moment login completes — no manual steps beyond logging in:
 
 ```bash
-node dist/index.js list-browsers   # see what's detected on this machine
+node dist/index.js list-browsers                # see what's detected on this machine
+node dist/index.js auth-login work --browser chrome
 ```
 
-### 2. Manual session import (fallback, if you hit a bot-detection wall)
+### 2. Import from a real browser (alternate — no browser window opens)
+
+Log into claude.ai normally in Chrome, Edge, or Brave, then let the bridge read the `sessionKey`
+cookie directly out of that browser's own (encrypted) cookie database instead of logging in
+fresh:
+
+```bash
+node dist/index.js list-cookie-browsers            # see what's detected on this machine
+node dist/index.js list-cookie-profiles chrome      # see profiles within a browser
+node dist/index.js auth-import-browser work --browser chrome --profile Default
+```
+
+Newer Chrome profiles protected by "App-Bound Encryption" (v20 cookies) can't be decrypted
+directly; this falls back automatically to briefly relaunching that browser headless against a
+throwaway copy of the profile and reading the cookie back through it — still no page is ever
+navigated to claude.ai.
+
+### 3. Manual session import (works anywhere, including other OSes/browsers)
 
 Log into claude.ai in your own regular browser, then in DevTools open
 **Application → Storage → Cookies → `https://claude.ai`** and copy the `sessionKey` value:
 
 ```bash
-node dist/index.js auth-set-session "sk-ant-sid01-..."
+node dist/index.js auth-set-session "sk-ant-sid01-..."          # saves/activates the "default" account
+node dist/index.js auth-set-session "sk-ant-sid01-..." --account work   # saves as a named account
 ```
 
-Verify either method worked:
+### Managing accounts
+
+```bash
+node dist/index.js auth-accounts        # list saved accounts, marks the active one
+node dist/index.js auth-use work        # switch the active account
+node dist/index.js auth-remove-account work
+```
+
+Verify the active session works:
 
 ```bash
 node dist/index.js auth-info
 ```
+
+If a stored session goes stale (expired/revoked), the API server pauses its request queue and
+waits — there is no automatic re-login. Re-run `auth-login`/`auth-set-session`/`auth-import-browser`,
+or `auth-use` another saved account, and the queue resumes automatically.
 
 ## Running the server
 
@@ -97,11 +124,18 @@ account is currently authenticated).
 
 | Command | Purpose |
 | --- | --- |
-| `list-browsers [--json]` | List browsers detected on this machine |
-| `auth-info [--login] [--browser <id>]` | Show `lastActiveOrg`/`account_profile`; `--login` runs interactive auth |
-| `auth-set-session <sessionKey>` | Import a session cookie manually |
-| `auth-clear [--profile]` | Delete stored auth (and optionally the browser profile) |
+| `auth-login [accountName] [--browser <id>]` | Primary: open a real browser window, log in normally, session captured automatically |
+| `list-cookie-browsers [--json]` | List browsers whose cookie DB can be read for `auth-import-browser` |
+| `list-cookie-profiles <browserId> [--json]` | List profiles within a browser (see above) |
+| `auth-import-browser <name> [--browser] [--profile]` | Alternate: read the sessionKey cookie directly from a real browser, save as account `<name>` |
+| `auth-set-session <sessionKey> [--account <name>]` | Manual: import a session cookie by pasting it |
+| `auth-accounts [--json]` | List saved accounts and which one is active |
+| `auth-use <name>` | Switch the active account |
+| `auth-remove-account <name>` | Delete a saved account |
+| `auth-info` | Show `lastActiveOrg`/`account_profile` for the active session |
+| `auth-clear` | Clear the active session (saved accounts are untouched) |
 | `auth-export [path]` | Export `auth.json` (sensitive — contains session cookies) |
+| `list-browsers [--json]` | List real installed browsers the transport can drive to talk to claude.ai |
 | `probe [prompt] [--headed]` | Send one prompt via the transport, for debugging |
 | `serve [--host] [--port]` | Start the HTTP API server |
 | `telemetry --on\|--off` | Toggle file logging to `~/.claude-free-bridge/bridge.log` |
@@ -117,9 +151,11 @@ src/
   config/
     paths.ts             Single source of truth for ~/.claude-free-bridge/* paths
   session/
-    auth.ts              Session storage, interactive login, cookie-based HTTP auth
-    browsers.ts           Detects installed Chrome/Edge/Brave/Firefox for login
+    auth.ts              Cookie-based HTTP auth for the active account (no login automation)
+    accounts.ts           Named account slots — save/switch/remove saved sessions
+    cookieExtract.ts       Reads sessionKey straight out of a real browser's cookie DB (DPAPI on Windows)
     orgStore.ts           Cache of known organization ids
+    browsers.ts           Detects installed Chrome/Edge/Brave/Firefox for the transport to drive
   transport/
     playwright.ts         Drives claude.ai: submits prompts, polls for replies (API-first, DOM fallback)
   orchestrator/
@@ -139,25 +175,38 @@ they interact.
 
 Other entry points:
 
-- `claude_bridge_gui.py` — optional PyQt5 desktop panel that wraps the CLI (build, auth,
-  serve/stop, probe, API smoke test, integration tests) with one-click buttons
+- `claude_bridge_gui.py` — optional PyQt5 desktop panel that wraps the CLI (build, account
+  import/switch/remove, serve/stop, probe, API smoke test, integration tests) with one-click
+  buttons
 - `integration-runner.js` — builds on the `serve` command to exercise `/health` and both
   streaming/non-streaming chat completions end-to-end
 
 ### Design notes
 
-- **Single-session queue**: `api.ts` processes requests one at a time (FIFO) since claude.ai's
-  web UI doesn't support concurrent input into one session. On an auth failure it pauses the
-  queue, triggers re-authentication, then resumes without dropping the in-flight request.
-- **Cookie-based HTTP over browser automation where possible**: `fetchWithAuth` and
+- **Two ways in, one account model**: `session/accounts.ts` stores every session — however it
+  was obtained — as a named, switchable slot rather than one global login, mirroring the
+  per-account model in [lugia19/Claude-Usage-Extension](https://github.com/lugia19/Claude-Usage-Extension)
+  (multiple claude.ai accounts side by side via `auth-accounts`, `auth-use`, `auth-remove-account`).
+  `auth-login` gets there by driving a real login flow; `auth-import-browser` gets there without
+  opening a browser at all, by reading a session that's already logged in — ported from that same
+  extension, which runs inside a browser the user is already logged into and reads the session
+  straight out of its cookie jar via `browser.cookies.get(...)`. `session/cookieExtract.ts` is the
+  direct Node equivalent for a standalone process.
+- **Single-session queue, manual re-auth**: `api.ts` processes requests one at a time (FIFO)
+  since claude.ai's web UI doesn't support concurrent input into one session. On an auth failure
+  it pauses the queue and waits — there is no automatic re-login — until the operator fixes the
+  session via `auth-login`, `auth-set-session`, `auth-import-browser`, or `auth-use`, at which
+  point the queue resumes automatically without dropping the in-flight request.
+- **Cookie-based HTTP over browser automation once a session exists**: `fetchWithAuth` and
   `getLastActiveOrg` in `session/auth.ts` make plain HTTP requests carrying the stored session
   cookie rather than launching a browser. A valid session cookie reads as a normal returning
   user to claude.ai, which is both faster and less likely to trigger bot-detection than
   navigating an automated browser.
-- **Real browser binaries for login**: `session/browsers.ts` detects and prefers a real
-  installed Chrome/Edge/Brave over Playwright's bundled Chromium for the one step that still
-  needs a browser (interactive login), since a real browser fingerprint is less likely to be
-  challenged.
+- **Real browser binaries wherever a browser has to be driven**: `session/browsers.ts` detects
+  and prefers a real installed Chrome/Edge/Brave over Playwright's bundled Chromium — for
+  `auth-login`'s login window, for the App-Bound Encryption fallback in `cookieExtract.ts`, and
+  for the transport submitting prompts into the claude.ai web UI — since a real browser
+  fingerprint is less likely to be challenged.
 
 ## Desktop GUI
 
@@ -166,9 +215,10 @@ pip install PyQt5
 python claude_bridge_gui.py
 ```
 
-Provides buttons for build, authenticate (with a browser picker), manual session import,
-start/stop server, a one-off probe, an API smoke test, and running the integration suite —
-each streams its command's output into the panel's log view.
+Provides buttons for build, logging in via a real browser window (primary), importing a session
+from an already-logged-in browser or by pasting a cookie (alternates), switching/removing saved
+accounts, start/stop server, a one-off probe, an API smoke test, and running the integration
+suite — each streams its command's output into the panel's log view.
 
 ## Development
 

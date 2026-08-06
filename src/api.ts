@@ -1,7 +1,7 @@
 import http from 'http';
 import { URL } from 'url';
 import { sendPromptViaPlaywright } from './transport/playwright';
-import { AuthInvalidError, ensureAuth, getLastActiveOrg, hasStoredAuth } from './session/auth';
+import { AuthInvalidError, getLastActiveOrg, hasStoredAuth } from './session/auth';
 import { debug, error, info, warn } from './logger';
 
 const DEFAULT_HOST = '127.0.0.1';
@@ -105,15 +105,24 @@ class RequestQueue {
     this.isProcessing = false;
   }
 
+  // There is no automatic re-login (the ported session model never drives a browser through a
+  // login flow — see session/auth.ts). Instead the queue just pauses and polls for the operator
+  // to fix the session out of band (auth-set-session, auth-import-browser, or auth-use via the
+  // CLI or GUI), then resumes automatically once a valid session reappears.
   private async pauseForReauth(item: QueueItem): Promise<void> {
-    warn('Auth invalid detected during request processing — pausing queue and triggering re-auth');
+    warn(
+      'Auth invalid detected during request processing — pausing queue. Re-authenticate with ' +
+      'auth-set-session, auth-import-browser, or auth-use (CLI or GUI) to resume.'
+    );
     this.queue.unshift(item);
     this.paused = true;
-    try {
-      await ensureAuth(true, 0);
-    } catch (reauthErr) {
-      error('Re-auth failed or was cancelled', reauthErr);
+
+    const pollIntervalMs = 3000;
+    while (!hasStoredAuth()) {
+      await new Promise((r) => setTimeout(r, pollIntervalMs));
     }
+    info('Valid session detected — resuming queue');
+
     this.paused = false;
     this.pauseResolve?.();
     this.pauseResolve = undefined;
@@ -225,7 +234,7 @@ async function handleHealth(res: http.ServerResponse): Promise<void> {
 
 async function handleChatCompletions(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   if (!hasStoredAuth()) {
-    sendJson(res, 503, { error: 'No stored auth available. Use the CLI to authenticate (auth-info --login).' });
+    sendJson(res, 503, { error: 'No stored auth available. Use the CLI to authenticate (auth-set-session or auth-import-browser).' });
     return;
   }
 

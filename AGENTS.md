@@ -23,10 +23,11 @@ to the real Anthropic API.
 
 **Boundaries:** owns the `RequestQueue`, a single-worker FIFO queue that serializes all chat
 requests — this exists because `transport/playwright.ts` can only drive one claude.ai session
-at a time. When a request fails with `AuthInvalidError`, the queue pauses itself, calls
-`ensureAuth` (interactive re-login), then resumes and retries the same request. It validates
-request bodies before handing them to the queue but has no knowledge of how prompts are
-actually delivered to claude.ai — that's the transport's job.
+at a time. When a request fails with `AuthInvalidError`, the queue pauses itself and polls
+`hasStoredAuth()` until the operator re-authenticates out of band (CLI or GUI — `auth-set-session`,
+`auth-import-browser`, or `auth-use`), then resumes and retries the same request. There is no
+automatic re-login. It validates request bodies before handing them to the queue but has no
+knowledge of how prompts are actually delivered to claude.ai — that's the transport's job.
 
 ## Transport (`src/transport/playwright.ts`)
 
@@ -43,21 +44,56 @@ returning nothing.
 
 ## Session subsystem (`src/session/`)
 
-**`auth.ts`** — owns everything about the stored session: `auth.json` (Playwright storageState
-format) on disk, direct HTTP requests carrying the session cookie (`fetchWithAuth`,
-`getLastActiveOrg`), and driving an interactive login browser (`ensureAuth`/`ensureAuthForOrg`)
-when no valid session exists. Throws `AuthInvalidError` when the server rejects the stored
-cookie (401/403), which is the signal `api.ts`'s queue watches for.
+Every session — however it was obtained — ends up as a named, switchable "account"
+(`accounts.ts`), mirroring the per-account/container model in
+[lugia19/Claude-Usage-Extension](https://github.com/lugia19/Claude-Usage-Extension). There are
+two ways in:
 
-**`browsers.ts`** — pure detection: locates real installed Chrome/Edge/Brave/Firefox binaries
-on disk so `auth.ts` can drive one of them instead of Playwright's bundled Chromium. Has no
-dependency on any other module in the project.
+1. **Interactive login** (`auth-login`, primary) — opens a real browser window and drives an
+   actual login flow, same as the old flow this project started with.
+2. **Reading an already-logged-in browser's cookies** (`auth-import-browser`, alternate) — no
+   browser opens at all. This half is ported from the extension, which runs inside a browser the
+   user is already logged into and reads the session straight out of that browser's cookie jar
+   (`browser.cookies.get(...)`). WebExtension APIs like `browser.cookies` don't exist in a
+   standalone Node process, so `cookieExtract.ts` is not a line-for-line port — it's the same
+   idea (read, don't log in) reimplemented for a Node CLI/server.
 
-**`orgStore.ts`** — a small TTL-based cache of organization ids the bridge has seen, so
-`getLastActiveOrg` doesn't need to hit the network every time. Depends only on the logger.
+**`auth.ts`** — both entry points into a session (`importAccountViaLogin` for interactive login,
+`importAccountFromBrowser`/`importSessionKeyAsAccount` for the cookie-read/manual-paste paths),
+plus cookie-based HTTP auth for the *active* account once a session exists: direct HTTP requests
+carrying the stored session cookie (`fetchWithAuth`, `getLastActiveOrg`), reading/writing
+`auth.json` on disk (Playwright storageState format, so `transport/playwright.ts` can load it
+straight into a browser context). Throws `AuthInvalidError` when the server rejects the stored
+cookie (401/403) and clears it; there is no automatic recovery from that state, which is the
+signal `api.ts`'s queue watches for to pause and wait for the operator.
 
-**Boundary rule:** nothing outside `session/` writes to `auth.json` or reads cookies directly —
-every other module goes through `auth.ts`'s exported functions.
+**`accounts.ts`** — the Node equivalent of the extension's container-strategy account model:
+named session slots under `~/.claude-free-bridge/profiles/accounts/<name>/auth.json`, an index of
+saved accounts, and a marker for which one is "active" (materialized into the global `auth.json`
+that `auth.ts` reads). `auth-accounts`/`auth-use`/`auth-remove-account` are the CLI surface.
+
+**`cookieExtract.ts`** — the direct Node equivalent of `browser.cookies.get(...)`: reads the
+`sessionKey` cookie straight out of Chrome/Edge/Brave's own (encrypted) cookie database on disk,
+decrypting it via Windows DPAPI (shelled out to PowerShell, since Node has no built-in DPAPI
+binding). Chrome profiles protected by App-Bound Encryption (v20 cookies) can't be unwrapped via
+DPAPI at all — the key is only released to a legitimately-signed, running copy of the browser —
+so those fall back to briefly relaunching the real browser headless against a throwaway copy of
+the profile and reading the (now browser-decrypted) cookie back through Playwright's CDP
+connection. Either way, no page is ever navigated to claude.ai.
+
+**`browsers.ts`** — pure detection: locates real installed Chrome/Edge/Brave/Firefox binaries on
+disk. Used by `auth.ts` for the interactive-login window, by `cookieExtract.ts`'s App-Bound
+Encryption fallback, and by `transport/playwright.ts` to submit prompts into the claude.ai UI —
+preferred over Playwright's bundled Chromium everywhere since a real browser fingerprint is less
+likely to be challenged. Has no dependency on any other module in the project.
+
+**`orgStore.ts`** — a small TTL-based cache of organization ids the bridge has seen, mirroring the
+extension's `tokenStorageManager.getKnownOrgIds()`, so `getLastActiveOrg` doesn't need to hit the
+network every time. Depends only on the logger.
+
+**Boundary rule:** nothing outside `session/` writes to `auth.json`/account files or reads
+cookies directly — every other module goes through `auth.ts`'s or `accounts.ts`'s exported
+functions.
 
 ## Orchestrator (`src/orchestrator/`)
 
@@ -118,9 +154,10 @@ still goes through `console.log`/`console.error` directly, since that's a differ
 
 ## Desktop GUI (`claude_bridge_gui.py`)
 
-**Role:** a PyQt5 panel that wraps the CLI commands above (build, authenticate with a browser
-picker, import a session cookie, start/stop the server, run a probe, smoke-test the chat API,
-run the integration suite) so they can be triggered with a click instead of a terminal.
+**Role:** a PyQt5 panel that wraps the CLI commands above (build, authenticate via a real browser
+login window, or import a session from an already-logged-in browser's cookie DB or by pasting a
+cookie, switch/remove saved accounts, start/stop the server, run a probe, smoke-test the chat
+API, run the integration suite) so they can be triggered with a click instead of a terminal.
 
 **Boundaries:** it shells out to the same `dist/index.js` CLI everything else uses — it holds
 no bridge logic of its own, only process management and log display.

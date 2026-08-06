@@ -15,7 +15,6 @@ except Exception:
 
 CONFIG_DIR = os.path.join(os.path.expanduser('~'), '.claude-free-bridge')
 AUTH_PATH = os.path.join(CONFIG_DIR, 'auth.json')
-PROFILES_ROOT = os.path.join(CONFIG_DIR, 'profiles')
 SERVER_URL = 'http://127.0.0.1:8080'
 
 
@@ -48,10 +47,10 @@ class MainWindow(QtWidgets.QWidget):
         self.info_grid.addWidget(self.lbl_last_org, 1, 0)
         self.info_grid.addWidget(self.val_last_org, 1, 1)
 
-        self.lbl_profiles = QtWidgets.QLabel('Profiles:')
-        self.val_profiles = QtWidgets.QLabel('0')
-        self.info_grid.addWidget(self.lbl_profiles, 2, 0)
-        self.info_grid.addWidget(self.val_profiles, 2, 1)
+        self.lbl_active_account = QtWidgets.QLabel('Active account:')
+        self.val_active_account = QtWidgets.QLabel('(none)')
+        self.info_grid.addWidget(self.lbl_active_account, 2, 0)
+        self.info_grid.addWidget(self.val_active_account, 2, 1)
 
         self.lbl_server = QtWidgets.QLabel('Server:')
         self.val_server = QtWidgets.QLabel('Stopped')
@@ -65,17 +64,52 @@ class MainWindow(QtWidgets.QWidget):
         self.btn_build.clicked.connect(self.run_build)
         row1.addWidget(self.btn_build)
 
-        self.btn_auth = QtWidgets.QPushButton('2. Authenticate (login)')
-        self.btn_auth.clicked.connect(self.run_auth)
-        row1.addWidget(self.btn_auth)
-
-        self.btn_import_session = QtWidgets.QPushButton('2b. Import Session Cookie')
-        self.btn_import_session.clicked.connect(self.run_import_session)
-        row1.addWidget(self.btn_import_session)
+        self.btn_auth_login = QtWidgets.QPushButton('2. Authenticate (Login)')
+        self.btn_auth_login.setToolTip(
+            'Primary method: opens a real browser window and lets you log into claude.ai normally. '
+            'The session is captured automatically the moment login completes.'
+        )
+        self.btn_auth_login.clicked.connect(self.run_auth_login)
+        row1.addWidget(self.btn_auth_login)
 
         self.btn_auth_info = QtWidgets.QPushButton('3. Show Auth Info')
         self.btn_auth_info.clicked.connect(self.run_auth_info)
         row1.addWidget(self.btn_auth_info)
+
+        # Alternate auth methods: import an existing session instead of logging in fresh
+        row1b = QtWidgets.QHBoxLayout()
+        layout.addLayout(row1b)
+        row1b.addWidget(QtWidgets.QLabel('Alternate:'))
+
+        self.btn_import_browser = QtWidgets.QPushButton('Import from Browser')
+        self.btn_import_browser.setToolTip(
+            'Reads the sessionKey cookie directly out of an already-logged-in Chrome/Edge/Brave '
+            'on this machine. No browser is launched or driven — nothing for bot-detection to challenge.'
+        )
+        self.btn_import_browser.clicked.connect(self.run_import_browser)
+        row1b.addWidget(self.btn_import_browser)
+
+        self.btn_import_session = QtWidgets.QPushButton('Import Session Cookie')
+        self.btn_import_session.clicked.connect(self.run_import_session)
+        row1b.addWidget(self.btn_import_session)
+        row1b.addStretch(1)
+
+        # Accounts: switch between named sessions saved via any of the methods above
+        row_accounts = QtWidgets.QHBoxLayout()
+        layout.addLayout(row_accounts)
+        row_accounts.addWidget(QtWidgets.QLabel('Accounts:'))
+        self.account_combo = QtWidgets.QComboBox()
+        self.account_combo.setMinimumWidth(160)
+        row_accounts.addWidget(self.account_combo)
+
+        self.btn_switch_account = QtWidgets.QPushButton('Switch')
+        self.btn_switch_account.clicked.connect(self.run_switch_account)
+        row_accounts.addWidget(self.btn_switch_account)
+
+        self.btn_remove_account = QtWidgets.QPushButton('Remove')
+        self.btn_remove_account.clicked.connect(self.run_remove_account)
+        row_accounts.addWidget(self.btn_remove_account)
+        row_accounts.addStretch(1)
 
         # Step 4: probe
         row2 = QtWidgets.QHBoxLayout()
@@ -133,17 +167,29 @@ class MainWindow(QtWidgets.QWidget):
 
     # --- info panel ----------------------------------------------------
 
+    def list_accounts(self):
+        cmd = self.cli_command('auth-accounts', '--json')
+        try:
+            out = subprocess.check_output(cmd, text=True, timeout=15)
+            return json.loads(out)
+        except Exception as e:
+            self.append_log('Could not list accounts: ' + str(e))
+            return []
+
     def refresh(self):
         auth_exists = os.path.exists(AUTH_PATH)
         self.val_auth.setText('Yes' if auth_exists else 'No')
 
-        profiles = []
-        if os.path.exists(PROFILES_ROOT):
-            try:
-                profiles = os.listdir(PROFILES_ROOT)
-            except Exception:
-                profiles = []
-        self.val_profiles.setText(str(len(profiles)))
+        accounts = self.list_accounts()
+        active = next((a['name'] for a in accounts if a.get('active')), None)
+        self.val_active_account.setText(active or '(none)')
+
+        self.account_combo.blockSignals(True)
+        self.account_combo.clear()
+        for a in accounts:
+            label = a['name'] + (' *' if a.get('active') else '')
+            self.account_combo.addItem(label, a['name'])
+        self.account_combo.blockSignals(False)
 
         last_org = 'Unknown'
         if auth_exists:
@@ -183,9 +229,9 @@ class MainWindow(QtWidgets.QWidget):
                 self.log_signal.emit('Build failed: ' + str(e))
         self.run_in_background(_run)
 
-    # --- step 2/3: auth ---------------------------------------------------
+    # --- step 2: primary auth (interactive login) --------------------------
 
-    def detect_browsers(self):
+    def detect_login_browsers(self):
         cmd = self.cli_command('list-browsers', '--json')
         try:
             out = subprocess.check_output(cmd, text=True, timeout=15)
@@ -194,25 +240,146 @@ class MainWindow(QtWidgets.QWidget):
             self.append_log('Could not detect browsers: ' + str(e))
             return [{'id': 'bundled', 'label': 'Automated Chromium (bundled)', 'kind': 'bundled'}]
 
-    def run_auth(self):
-        browsers = self.detect_browsers()
+    def run_auth_login(self):
+        browsers = self.detect_login_browsers()
         labels = [b['label'] for b in browsers]
         choice, ok = QtWidgets.QInputDialog.getItem(
-            self, 'Select browser', 'Use which browser for login?', labels, 0, False
+            self, 'Select browser', 'Log in using which browser?', labels, 0, False
         )
         if not ok:
             return
         browser_id = browsers[labels.index(choice)]['id']
 
+        account_name, ok = QtWidgets.QInputDialog.getText(
+            self, 'Account name', 'Save this login under which account name?', text='default'
+        )
+        if not ok or not account_name.strip():
+            return
+
         def _run():
-            cmd = self.cli_command('auth-info', '--login', '--browser', browser_id)
-            self.log_signal.emit('Auth using "%s" (opens a browser window — complete login there): %s' % (choice, ' '.join(cmd)))
+            cmd = self.cli_command('auth-login', account_name.strip(), '--browser', browser_id)
+            self.log_signal.emit(
+                'Logging in with "%s" (a browser window will open — complete login there): %s'
+                % (choice, ' '.join(cmd))
+            )
             try:
-                p = subprocess.Popen(cmd)
+                p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                for line in p.stdout:
+                    self.log_signal.emit(line.rstrip())
                 p.wait()
-                self.log_signal.emit('Auth process finished')
+                self.log_signal.emit('Login process finished with exit code ' + str(p.returncode))
             except Exception as e:
-                self.log_signal.emit('Auth failed: ' + str(e))
+                self.log_signal.emit('Login failed: ' + str(e))
+            self.refresh_signal.emit()
+        self.run_in_background(_run)
+
+    # --- step 2b/2c: alternate auth (import an existing session) -----------
+
+    def detect_cookie_browsers(self):
+        cmd = self.cli_command('list-cookie-browsers', '--json')
+        try:
+            out = subprocess.check_output(cmd, text=True, timeout=15)
+            return json.loads(out)
+        except Exception as e:
+            self.append_log('Could not detect browsers: ' + str(e))
+            return []
+
+    def detect_cookie_profiles(self, browser_id):
+        cmd = self.cli_command('list-cookie-profiles', browser_id, '--json')
+        try:
+            out = subprocess.check_output(cmd, text=True, timeout=15)
+            return json.loads(out)
+        except Exception as e:
+            self.append_log('Could not list profiles: ' + str(e))
+            return []
+
+    def run_import_browser(self):
+        browsers = self.detect_cookie_browsers()
+        if not browsers:
+            QtWidgets.QMessageBox.warning(
+                self, 'No browsers found',
+                'No supported browser (Chrome, Edge, Brave) with a User Data folder was found on this machine.'
+            )
+            return
+        labels = [b['label'] for b in browsers]
+        choice, ok = QtWidgets.QInputDialog.getItem(
+            self, 'Select browser', 'Read the claude.ai session cookie from which browser?', labels, 0, False
+        )
+        if not ok:
+            return
+        browser_id = browsers[labels.index(choice)]['id']
+
+        profiles = self.detect_cookie_profiles(browser_id)
+        if not profiles:
+            QtWidgets.QMessageBox.warning(self, 'No profiles found', f'No profiles found for {choice}.')
+            return
+        profile_labels = [p['displayName'] for p in profiles]
+        profile_choice, ok = QtWidgets.QInputDialog.getItem(
+            self, 'Select profile', f'Which {choice} profile is logged into claude.ai?', profile_labels, 0, False
+        )
+        if not ok:
+            return
+        profile_id = profiles[profile_labels.index(profile_choice)]['id']
+
+        account_name, ok = QtWidgets.QInputDialog.getText(
+            self, 'Account name', 'Save this session under which account name?', text='default'
+        )
+        if not ok or not account_name.strip():
+            return
+
+        def _run():
+            cmd = self.cli_command('auth-import-browser', account_name.strip(), '--browser', browser_id, '--profile', profile_id)
+            self.log_signal.emit('Importing session from %s ("%s")...' % (choice, profile_choice))
+            try:
+                p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                for line in p.stdout:
+                    self.log_signal.emit(line.rstrip())
+                p.wait()
+            except Exception as e:
+                self.log_signal.emit('Import failed: ' + str(e))
+            self.refresh_signal.emit()
+        self.run_in_background(_run)
+
+    def run_switch_account(self):
+        name = self.account_combo.currentData()
+        if not name:
+            self.append_log('No account selected.')
+            return
+
+        def _run():
+            cmd = self.cli_command('auth-use', name)
+            self.log_signal.emit('Switching active account to "%s"...' % name)
+            try:
+                p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                for line in p.stdout:
+                    self.log_signal.emit(line.rstrip())
+                p.wait()
+            except Exception as e:
+                self.log_signal.emit('Switch failed: ' + str(e))
+            self.refresh_signal.emit()
+        self.run_in_background(_run)
+
+    def run_remove_account(self):
+        name = self.account_combo.currentData()
+        if not name:
+            self.append_log('No account selected.')
+            return
+        confirm = QtWidgets.QMessageBox.question(
+            self, 'Remove account', f'Remove saved account "{name}"? This cannot be undone.'
+        )
+        if confirm != QtWidgets.QMessageBox.Yes:
+            return
+
+        def _run():
+            cmd = self.cli_command('auth-remove-account', name)
+            self.log_signal.emit('Removing account "%s"...' % name)
+            try:
+                p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                for line in p.stdout:
+                    self.log_signal.emit(line.rstrip())
+                p.wait()
+            except Exception as e:
+                self.log_signal.emit('Remove failed: ' + str(e))
             self.refresh_signal.emit()
         self.run_in_background(_run)
 

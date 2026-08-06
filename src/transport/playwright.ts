@@ -1,12 +1,6 @@
 import { chromium, ElementHandle, Page } from 'playwright';
-import {
-  AuthInvalidError,
-  ensureAuth,
-  fetchWithAuth,
-  getContextOptionsForOrg,
-  getContextOptionsFromStoredAuth,
-  getLastActiveOrg,
-} from '../session/auth';
+import { BrowserContextOptions } from 'playwright';
+import { AuthInvalidError, fetchWithAuth, getLastActiveOrg, getStorageStatePath, hasStoredAuth } from '../session/auth';
 import { detectInstalledBrowsers } from '../session/browsers';
 import { applyStealth, STEALTH_IGNORE_DEFAULT_ARGS, STEALTH_LAUNCH_ARGS } from '../session/stealth';
 import { debug, info, warn } from '../logger';
@@ -71,36 +65,31 @@ async function findLastVisibleMessageText(page: Page): Promise<string> {
   });
 }
 
-async function ensureAuthenticatedContext(headed: boolean) {
-  if (!getContextOptionsFromStoredAuth()) {
-    await ensureAuth(true, 0);
+/**
+ * Loads the active account's stored cookies into a Playwright storageState so the transport
+ * browser is authenticated. There is no login fallback here: unlike the old flow, an invalid or
+ * missing session is never repaired by opening a browser and driving a login UI — the operator
+ * must re-run auth-set-session / auth-import-browser / auth-use out of band (matching the
+ * extension's model, where the extension itself never logs anyone in).
+ */
+async function authenticatedContextOptions(): Promise<BrowserContextOptions> {
+  if (!hasStoredAuth()) {
+    throw new AuthInvalidError(
+      'No stored session. Run "auth-set-session <sessionKey>" or "auth-import-browser <name>" first.'
+    );
   }
-  let contextOptions = getContextOptionsFromStoredAuth();
 
   const org = await getLastActiveOrg().catch(() => null);
-  if (org) {
-    const orgOptions = getContextOptionsForOrg(org);
-    if (orgOptions) {
-      contextOptions = orgOptions;
-      info('Using profile for org', org);
-    }
+  if (org) info('Using active session for org', org);
+
+  try {
+    await fetchWithAuth('https://claude.ai/api/account_profile');
+  } catch (e) {
+    if (e instanceof AuthInvalidError) throw e;
+    debug('Non-auth error during auth validation', (e as Error)?.message ?? e);
   }
 
-  if (contextOptions) {
-    try {
-      await fetchWithAuth('https://claude.ai/api/account_profile');
-    } catch (e) {
-      if (e instanceof AuthInvalidError) {
-        warn('Stored auth invalid — launching interactive re-auth');
-        await ensureAuth(headed, 0);
-        contextOptions = getContextOptionsFromStoredAuth();
-      } else {
-        debug('Non-auth error during auth validation', (e as Error)?.message ?? e);
-      }
-    }
-  }
-
-  return contextOptions;
+  return { storageState: getStorageStatePath() };
 }
 
 async function submitPrompt(page: Page, prompt: string): Promise<void> {
@@ -240,10 +229,10 @@ async function launchTransportBrowser(headed: boolean) {
 
 export async function sendPromptViaPlaywright(prompt: string, opts: SendPromptOptions = {}): Promise<string> {
   const headed = opts.headed ?? true;
-  const contextOptions = await ensureAuthenticatedContext(headed);
+  const contextOptions = await authenticatedContextOptions();
 
   const browser = await launchTransportBrowser(headed);
-  const context = contextOptions ? await browser.newContext(contextOptions) : await browser.newContext();
+  const context = await browser.newContext(contextOptions);
   await applyStealth(context);
   const page = await context.newPage();
 
