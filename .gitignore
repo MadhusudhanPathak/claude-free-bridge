@@ -1,33 +1,33 @@
-.claude-free-bridge/
-# Ignore Playwright profile and stored auth
-.claude-free-bridge/*
-!.claude-free-bridge/README
-
-# Node modules
+# Dependencies
 node_modules/
 
-# Build outputs
-dist/
+# Build output and release packages
+packages/*/dist/
+release/
+*.tgz
 *.tsbuildinfo
-*.png
+
+# Test coverage
+coverage/
+.nyc_output/
+
+# Logs
 *.log
-*.bak
+npm-debug.log*
 
-# Editor and OS files
-.vscode/
-.idea/
-.DS_Store
-Thumbs.db
-
-# Environment / secret files
+# Local environment and secrets
 .env
 .env.*
-*.pem
-*.key
-*.secret
 
-# Test / coverage
-coverage/
+# Editors
+.vscode/
+.idea/
+.vs/
+*.swp
+*.swo
+*~
 
-# npm debug
-npm-debug.log*
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini

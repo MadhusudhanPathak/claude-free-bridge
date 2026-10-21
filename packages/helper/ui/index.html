@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Claude Free Bridge</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23d97757'/%3E%3Cpath d='M5 19h22v3H5zM8 22h2.5v5H8zM21.5 22H24v5h-2.5zM7 19a9 8 0 0 1 18 0h-3a6 5.2 0 0 0-12 0z' fill='%23fff'/%3E%3C/svg%3E"
+    />
+    <link rel="stylesheet" href="ui.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <svg class="logo" viewBox="0 0 32 32" aria-hidden="true">
+          <rect width="32" height="32" rx="7" fill="#d97757" />
+          <path d="M5 19h22v3H5zM8 22h2.5v5H8zM21.5 22H24v5h-2.5zM7 19a9 8 0 0 1 18 0h-3a6 5.2 0 0 0-12 0z" fill="#fff" />
+        </svg>
+        <strong>Claude Free Bridge</strong>
+        <span class="muted" id="version"></span>
+      </div>
+      <nav class="tabs" role="tablist" aria-label="Sections">
+        <button type="button" role="tab" id="tab-btn-setup" data-tab="setup" aria-controls="tab-setup">Setup</button>
+        <button type="button" role="tab" id="tab-btn-apps" data-tab="apps" aria-controls="tab-apps">Use with your apps</button>
+        <button type="button" role="tab" id="tab-btn-playground" data-tab="playground" aria-controls="tab-playground">Playground</button>
+      </nav>
+      <div class="topbar-end">
+        <div class="status" role="status">
+          <span class="dot" id="status-dot"></span>
+          <span id="status-text">Starting…</span>
+        </div>
+        <button id="quit" type="button" class="ghost small" hidden>Quit</button>
+      </div>
+    </header>
+
+    <div id="banner" class="banner" role="alert" hidden></div>
+
+    <!-- Setup -->
+    <section id="tab-setup" class="page" role="tabpanel" aria-labelledby="tab-btn-setup" hidden>
+      <div class="narrow">
+        <h1>Set up in three steps</h1>
+        <p class="lead">
+          Claude Free Bridge lets apps on this computer use your claude.ai account through your browser.
+          Keep this app running while you use it. Each step ticks itself off when it's done.
+        </p>
+
+        <ol class="steps">
+          <li class="step" id="step-ext">
+            <span class="step-mark" aria-hidden="true">1</span>
+            <div class="step-body">
+              <h2>Add the extension to your browser</h2>
+              <p class="muted">Works in Microsoft Edge, Brave, Chrome and other Chromium browsers.</p>
+              <ol class="howto">
+                <li>
+                  Open your browser's extensions page by pasting its address into the address bar:
+                  <div class="chips">
+                    <button type="button" class="chip" data-copy-text="edge://extensions">Edge: edge://extensions</button>
+                    <button type="button" class="chip" data-copy-text="brave://extensions">Brave: brave://extensions</button>
+                    <button type="button" class="chip" data-copy-text="chrome://extensions">Chrome: chrome://extensions</button>
+                  </div>
+                  <span class="hint">Click one to copy it.</span>
+                </li>
+                <li>Turn on <b>Developer mode</b>, using the switch on that page.</li>
+                <li>
+                  Click <b>Load unpacked</b> and choose this folder:
+                  <div class="copy-row">
+                    <code id="ext-dir" class="value">…</code>
+                    <button type="button" data-copy-from="ext-dir">Copy</button>
+                    <button type="button" id="open-ext-dir">Open folder</button>
+                  </div>
+                </li>
+                <li>
+                  Pin it to the toolbar: click the puzzle-piece icon, then the pin next to
+                  <b>Claude Free Bridge</b>.
+                </li>
+              </ol>
+              <p class="done-note" hidden></p>
+            </div>
+          </li>
+
+          <li class="step" id="step-pair">
+            <span class="step-mark" aria-hidden="true">2</span>
+            <div class="step-body">
+              <h2>Connect the extension to this app</h2>
+              <p>
+                Click the <b>Claude Free Bridge</b> icon in your browser's toolbar. In the panel that opens,
+                paste this pairing code and click <b>Connect</b>.
+              </p>
+              <div class="copy-row">
+                <code id="pair-code" class="value secret"></code>
+                <button type="button" class="primary" data-copy-secret="pairingToken">Copy pairing code</button>
+              </div>
+              <p class="done-note" id="pair-done" hidden></p>
+            </div>
+          </li>
+
+          <li class="step" id="step-login">
+            <span class="step-mark" aria-hidden="true">3</span>
+            <div class="step-body">
+              <h2>Log in to claude.ai</h2>
+              <p>
+                In the same browser, make sure you're logged in at
+                <a href="https://claude.ai" target="_blank" rel="noreferrer">claude.ai</a>.
+              </p>
+              <p class="done-note" hidden></p>
+            </div>
+          </li>
+        </ol>
+
+        <div class="ready card" id="ready" hidden>
+          <h2>You're all set</h2>
+          <p>Try it in the Playground, or connect your own apps.</p>
+          <div class="buttons">
+            <button type="button" class="primary" data-goto="playground">Open the Playground</button>
+            <button type="button" data-goto="apps">Use with your apps</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Use with your apps -->
+    <section id="tab-apps" class="page" role="tabpanel" aria-labelledby="tab-btn-apps" hidden>
+      <div class="narrow">
+        <h1>Use with your apps</h1>
+        <p class="lead">
+          Apps and scripts that can use the OpenAI or Anthropic API can use Claude Free Bridge instead.
+          Give them these settings:
+        </p>
+
+        <div class="card fields">
+          <div class="field">
+            <div class="label">API key</div>
+            <div class="copy-row">
+              <code id="api-key" class="value secret"></code>
+              <button type="button" id="key-show">Show</button>
+              <button type="button" class="primary" data-copy-secret="apiKey">Copy</button>
+            </div>
+          </div>
+          <div class="field">
+            <div class="label">Base URL for OpenAI-compatible apps</div>
+            <div class="copy-row">
+              <code id="url-openai" class="value"></code>
+              <button type="button" data-copy-from="url-openai">Copy</button>
+            </div>
+          </div>
+          <div class="field">
+            <div class="label">Base URL for Anthropic-compatible apps</div>
+            <div class="copy-row">
+              <code id="url-anthropic" class="value"></code>
+              <button type="button" data-copy-from="url-anthropic">Copy</button>
+            </div>
+          </div>
+          <div class="field">
+            <div class="label">Model</div>
+            <div class="copy-row">
+              <code id="model-name" class="value">claude-web</code>
+              <button type="button" data-copy-from="model-name">Copy</button>
+            </div>
+            <p class="hint">Uses your claude.ai account's default model.</p>
+          </div>
+        </div>
+
+        <h2>Examples</h2>
+        <div class="snippet-tabs" role="tablist" aria-label="Examples">
+          <button type="button" role="tab" data-snippet="py-openai">Python (OpenAI)</button>
+          <button type="button" role="tab" data-snippet="py-anthropic">Python (Anthropic)</button>
+          <button type="button" role="tab" data-snippet="js">JavaScript</button>
+          <button type="button" role="tab" data-snippet="curl">curl</button>
+          <button type="button" role="tab" data-snippet="env">Environment variables</button>
+        </div>
+        <div class="snippet">
+          <pre id="snippet"></pre>
+          <button type="button" class="small" id="snippet-copy">Copy</button>
+        </div>
+
+        <h2>Good to know</h2>
+        <ul class="notes">
+          <li>Each request starts a new chat in your claude.ai history, named “API · …”. To delete these automatically, open the extension's panel and go to <b>Settings</b>.</li>
+          <li>Text only for now. Images, files and tool calls aren't supported yet, so coding agents that rely on tools (Claude Code, Cline…) can chat but can't use their tools.</li>
+          <li>Requests run one at a time and count toward your claude.ai usage limits.</li>
+          <li>The API only answers apps on this computer. Keep your API key private.</li>
+        </ul>
+
+        <details class="card reset">
+          <summary>Reset the API key and pairing code</summary>
+          <p>
+            Do this if someone else may have your key. Afterwards, give your apps the new key and paste the new
+            pairing code into the extension.
+          </p>
+          <button type="button" id="reset-keys" class="danger">Reset keys</button>
+        </details>
+      </div>
+    </section>
+
+    <!-- Playground -->
+    <section id="tab-playground" class="page playground" role="tabpanel" aria-labelledby="tab-btn-playground" hidden>
+      <aside class="sidebar">
+        <section>
+          <div class="label" id="mode-label">API</div>
+          <div class="segmented" role="radiogroup" aria-labelledby="mode-label">
+            <button type="button" role="radio" data-mode="openai">OpenAI</button>
+            <button type="button" role="radio" data-mode="anthropic">Anthropic</button>
+            <button type="button" role="radio" data-mode="bridge">Bridge</button>
+          </div>
+          <p class="hint" id="mode-hint"></p>
+        </section>
+
+        <section>
+          <label for="model">Model</label>
+          <select id="model"></select>
+          <label class="check"><input type="checkbox" id="stream" checked /> Stream the reply</label>
+        </section>
+
+        <section id="system-section">
+          <label for="system">System prompt <span class="muted">(optional)</span></label>
+          <textarea id="system" rows="4" placeholder="e.g. Answer in one short paragraph."></textarea>
+        </section>
+
+        <section id="chats-section" hidden>
+          <div class="section-head">
+            <span class="label">Your claude.ai chats</span>
+            <button id="chats-refresh" type="button" class="ghost small">Refresh</button>
+          </div>
+          <button id="new-chat" type="button" class="small">+ New chat</button>
+          <ul id="chats" class="chats"></ul>
+        </section>
+      </aside>
+
+      <div class="main">
+        <div class="chat-head">
+          <span id="chat-title" class="chat-title">New conversation</span>
+          <a id="chat-link" target="_blank" rel="noreferrer" hidden>Open in claude.ai ↗</a>
+          <button id="clear" type="button" class="ghost small">Clear</button>
+        </div>
+
+        <div id="messages" class="messages" aria-live="polite">
+          <div id="empty" class="empty">
+            <p><strong>Send a message to try it out.</strong></p>
+            <p class="muted">It goes from here to your browser and on to claude.ai, the same way your apps' requests do.</p>
+          </div>
+        </div>
+
+        <form id="composer" class="composer">
+          <textarea id="input" rows="3" placeholder="Message Claude… (Ctrl+Enter to send)"></textarea>
+          <div class="composer-actions">
+            <button id="send" type="submit" class="primary">Send</button>
+            <button id="stop" type="button" hidden>Stop</button>
+          </div>
+        </form>
+
+        <details class="raw">
+          <summary>Raw HTTP of the last request</summary>
+          <div class="raw-grid">
+            <div>
+              <div class="label">Request</div>
+              <pre id="raw-req">(nothing sent yet)</pre>
+            </div>
+            <div>
+              <div class="label">Response</div>
+              <pre id="raw-res"></pre>
+            </div>
+          </div>
+        </details>
+      </div>
+    </section>
+
+    <!-- Shown when the page wasn't opened by the app -->
+    <section id="locked" class="locked" hidden>
+      <div class="card">
+        <h1>Open this from the Claude Free Bridge app</h1>
+        <p>
+          This page shows your private keys, so it only opens from the app. Start Claude Free Bridge
+          (double-click <b>ClaudeFreeBridge.exe</b>). If it's already running, start it again: that reopens
+          this window.
+        </p>
+      </div>
+    </section>
+
+    <div id="toast" class="toast" role="status" hidden></div>
+
+    <script src="ui.js"></script>
+  </body>
+</html>

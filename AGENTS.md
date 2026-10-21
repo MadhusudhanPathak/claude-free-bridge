@@ -1,169 +1,267 @@
 # Components
 
 This document describes each component in Claude Free Bridge: its responsibility, its
-boundaries, and how it talks to the others. "Agent" here is used loosely — most of these are
-plain modules, not autonomous agents — with the exception of the orchestrator, which drives an
-actual tool-use loop.
+boundaries, and how it talks to the others. The product has two halves joined by one local
+WebSocket:
 
-## CLI (`src/index.ts`)
+- the **app** (`packages/helper`, Node; shipped as `ClaudeFreeBridge.exe` or run from npm/source):
+  serves the HTTP API that other apps call, and the **Control Center** page users set things up in;
+- the **extension** (`packages/extension`, Manifest V3, Chromium): runs inside the user's
+  logged-in browser and is the only part that talks to claude.ai.
 
-**Role:** single entry point for every operator-facing command (auth, serve, probe, run,
-telemetry). Built on `commander`.
+Both import their shared types and helpers from `packages/shared/src/`.
 
-**Boundaries:** contains no business logic itself — every action delegates immediately to
-`session/auth.ts`, `session/browsers.ts`, `transport/playwright.ts`, `orchestrator/loop.ts`, or
-`api.ts`. Its job is argument parsing, user-facing output (`console.log`/`console.error`), and
-process exit codes.
+```text
+app/tool ──HTTP──▶ helper: http/server → adapters → SendQueue → ExtensionLink ══WS══▶
+      extension: HelperLink → background (runJob) → tabRunner → content script → claude/* ──▶ claude.ai
 
-## HTTP API server (`src/api.ts`)
+user ──▶ Control Center (helper/ui, served by the helper) ──/ui/* + public API──▶ helper
+```
 
-**Role:** exposes an Anthropic-Messages-compatible subset over HTTP (`/health`, `/v1/models`,
-`/v1/chat/completions`) so external coding agents can talk to the bridge like they would talk
-to the real Anthropic API.
+## Build, tooling and release
 
-**Boundaries:** owns the `RequestQueue`, a single-worker FIFO queue that serializes all chat
-requests — this exists because `transport/playwright.ts` can only drive one claude.ai session
-at a time. When a request fails with `AuthInvalidError`, the queue pauses itself and polls
-`hasStoredAuth()` until the operator re-authenticates out of band (CLI or GUI — `auth-set-session`,
-`auth-import-browser`, or `auth-use`), then resumes and retries the same request. There is no
-automatic re-login. It validates request bodies before handing them to the queue but has no
-knowledge of how prompts are actually delivered to claude.ai — that's the transport's job.
+| File | Role |
+| --- | --- |
+| `package.json` | One package for everything; also the npm package (`files` = bundled app + extension). No runtime dependencies (everything is bundled). Dev dependencies: `esbuild`, `typescript`, `ws`, `postject` and `rcedit` (exe), plus types. The `version` field is the single source of the release version. |
+| `build.mjs` | esbuild bundles `helper/src/{cli,server}.ts` (Node/CommonJS, all dependencies inlined) to `packages/helper/dist/`. The Control Center (`helper/ui/main.ts` plus its HTML/CSS) is built during that bundle and embedded as the `virtual:ui-assets` module. It also bundles `extension/src/{background,content,sidepanel/panel}.ts` (browser/IIFE) to `packages/extension/dist/`, writes the manifest with the package version, and copies the side panel HTML/CSS and icons. `__VERSION__` is defined everywhere. |
+| `scripts/release.mjs` | Windows + Node 22+. It builds and runs the tests, then turns `dist/cli.js` into `ClaudeFreeBridge.exe`: a Node single-executable app, with its icon and file details set by rcedit before postject injects the app. It smoke-tests the exe with `--version`, then writes `release/ClaudeFreeBridge-<v>-windows-x64.zip` (exe + `extension/` + `README.txt` + `LICENSE.txt`) and `release/claude-free-bridge-extension-<v>.zip`, using a built-in zip writer. |
+| `tsconfig.base.json` | Shared strict settings, type-check only (`noEmit`); esbuild does the compiling. Unused locals and parameters are errors. |
+| `tsconfig.helper.json` / `.extension.json` / `.ui.json` | Node types / DOM + Chrome types / DOM only. They're kept apart so globals can't leak into the wrong code. `shared/` is checked by all three. |
 
-## Transport (`src/transport/playwright.ts`)
+**Keep it lean:** no dead code or unused exports. Export something only if another module or a
+test uses it. `npm run typecheck` must stay clean.
 
-**Role:** the only component that actually talks to claude.ai's UI. Given a prompt, it submits
-it into the web composer and returns the assistant's reply, optionally streaming incremental
-deltas via an `onChunk` callback.
+## Shared (`packages/shared/src/`)
 
-**Boundaries:** prefers polling claude.ai's internal conversation API (via `fetchWithAuth`) for
-retrieving replies, since that is more deterministic than reading the DOM; DOM scraping is a
-fallback. It depends on `session/auth.ts` for credentials but has no opinion on how those
-credentials were obtained (interactive login vs. imported cookie look identical to it). If it
-cannot find the message composer, it fails fast with a screenshot rather than silently
-returning nothing.
+Code here runs in Node, the extension and the Control Center, so it uses only APIs all three
+have (no Node, DOM or Chrome specifics).
 
-## Session subsystem (`src/session/`)
+- **`protocol.ts`**: the single definition of every app↔extension WebSocket frame, the
+  operations (`OpMap`: `send`, `listConversations`, `getConversation`, `createConversation`,
+  `deleteConversation`, `status`), error codes, close codes, settings and status shapes.
+- **`errors.ts`**: `BridgeFailure`, the error both sides throw (a protocol error code, a
+  message and an optional `retryAfter`), and `toBridgeError()`, which turns anything thrown into
+  its wire form.
+- **`sse.ts`**: `readSseEvents()`, a server-sent events reader used for claude.ai's completion
+  stream (extension) and the Playground's streamed replies (Control Center).
+- **`text.ts`**: `shorten()` / `firstLine()` for chat names and activity labels.
+- **`globals.d.ts`**: declares the build-time `__VERSION__`.
 
-Every session — however it was obtained — ends up as a named, switchable "account"
-(`accounts.ts`), mirroring the per-account/container model in
-[lugia19/Claude-Usage-Extension](https://github.com/lugia19/Claude-Usage-Extension). There are
-two ways in:
+**Boundary rule:** any change to what crosses the WebSocket starts in `protocol.ts`. Bump
+`PROTOCOL_VERSION` for incompatible changes; the app refuses mismatched extensions with a
+message telling the user to load the extension that came with the app.
 
-1. **Interactive login** (`auth-login`, primary) — opens a real browser window and drives an
-   actual login flow, same as the old flow this project started with.
-2. **Reading an already-logged-in browser's cookies** (`auth-import-browser`, alternate) — no
-   browser opens at all. This half is ported from the extension, which runs inside a browser the
-   user is already logged into and reads the session straight out of that browser's cookie jar
-   (`browser.cookies.get(...)`). WebExtension APIs like `browser.cookies` don't exist in a
-   standalone Node process, so `cookieExtract.ts` is not a line-for-line port — it's the same
-   idea (read, don't log in) reimplemented for a Node CLI/server.
+## App (`packages/helper/src/`)
 
-**`auth.ts`** — both entry points into a session (`importAccountViaLogin` for interactive login,
-`importAccountFromBrowser`/`importSessionKeyAsAccount` for the cookie-read/manual-paste paths),
-plus cookie-based HTTP auth for the *active* account once a session exists: direct HTTP requests
-carrying the stored session cookie (`fetchWithAuth`, `getLastActiveOrg`), reading/writing
-`auth.json` on disk (Playwright storageState format, so `transport/playwright.ts` can load it
-straight into a browser context). Throws `AuthInvalidError` when the server rejects the stored
-cookie (401/403) and clears it; there is no automatic recovery from that state, which is the
-signal `api.ts`'s queue watches for to pause and wait for the operator.
+**`cli.ts`**: entry point. With no command (double-click), it starts the app and opens the
+Control Center:
 
-**`accounts.ts`** — the Node equivalent of the extension's container-strategy account model:
-named session slots under `~/.claude-free-bridge/profiles/accounts/<name>/auth.json`, an index of
-saved accounts, and a marker for which one is "active" (materialized into the global `auth.json`
-that `auth.ts` reads). `auth-accounts`/`auth-use`/`auth-remove-account` are the CLI surface.
+- If the port is taken by a running copy of the app, it just reopens that copy's Control Center.
+- If another program has the port, it explains, and waits for Enter so the console doesn't vanish.
+- `serve` starts without a window. `token [--rotate]` and `status` are for servers and developers.
 
-**`cookieExtract.ts`** — the direct Node equivalent of `browser.cookies.get(...)`: reads the
-`sessionKey` cookie straight out of Chrome/Edge/Brave's own (encrypted) cookie database on disk,
-decrypting it via Windows DPAPI (shelled out to PowerShell, since Node has no built-in DPAPI
-binding). Chrome profiles protected by App-Bound Encryption (v20 cookies) can't be unwrapped via
-DPAPI at all — the key is only released to a legitimately-signed, running copy of the browser —
-so those fall back to briefly relaunching the real browser headless against a throwaway copy of
-the profile and reading the (now browser-decrypted) cookie back through Playwright's CDP
-connection. Either way, no page is ever navigated to claude.ai.
+It holds no other logic.
 
-**`browsers.ts`** — pure detection: locates real installed Chrome/Edge/Brave/Firefox binaries on
-disk. Used by `auth.ts` for the interactive-login window, by `cookieExtract.ts`'s App-Bound
-Encryption fallback, and by `transport/playwright.ts` to submit prompts into the claude.ai UI —
-preferred over Playwright's bundled Chromium everywhere since a real browser fingerprint is less
-likely to be challenged. Has no dependency on any other module in the project.
+**`app.ts`**: desktop behaviour:
 
-**`orgStore.ts`** — a small TTL-based cache of organization ids the bridge has seen, mirroring the
-extension's `tokenStorageManager.getKnownOrgIds()`, so `getLastActiveOrg` doesn't need to hit the
-network every time. Depends only on the logger.
+- `findExtensionDir()`: next to the exe when running as `ClaudeFreeBridge.exe`, otherwise
+  `packages/extension/dist`.
+- `openWindow()`: an app-style Edge window on Windows, otherwise the default browser.
+- `openFolder()` and `controlCenterUrl()`.
 
-**Boundary rule:** nothing outside `session/` writes to `auth.json`/account files or reads
-cookies directly — every other module goes through `auth.ts`'s or `accounts.ts`'s exported
-functions.
+**`server.ts`**: `startHelper(config, appHooks)` wires `ExtensionLink`, `SendQueue` and the
+HTTP server onto one port. `appHooks` (extension folder, `onQuit`, `saveConfig`, `openFolder`)
+are what only the desktop app provides; the tests pass none. `cfg` may be changed in place
+(key reset).
 
-## Orchestrator (`src/orchestrator/`)
+**`config.ts`**: the single source of truth for `~/.claude-free-bridge/` (`CLAUDE_FB_HOME`
+overrides it) and `config.json`. On first run it generates the API key, the pairing code
+(`pairingToken`) and the `uiToken`. Missing fields get defaults; a file that isn't valid JSON or
+has a value of the wrong type is reported and never overwritten.
 
-**`loop.ts`** — an experimental single-pass agent loop (`agentLoop`): sends a task prompt via
-the transport, parses any `<tool_use>` blocks out of the reply, executes them through
-`tools/registry.ts`, and persists the conversation. It does not loop back with tool results for
-a second turn yet (documented MVP limitation).
+**`security.ts`**: constant-time secret comparison and the loopback-host check.
 
-**`context.ts`** — `ContextComposer` tracks message history for one run and applies a naive
-summarization once history grows past a threshold, so prompts stay bounded in size. Pure
-in-memory state; no I/O.
+**`logger.ts`**: console logging; `CLAUDE_FB_DEBUG`, `CLAUDE_FB_LOG` and `CLAUDE_FB_QUIET`
+control it.
 
-**Boundary rule:** the orchestrator is the only caller of `tools/registry.ts` — tools are never
-invoked directly by the CLI or API server.
+**`extensionLink.ts`**: the app's end of the WebSocket at `/ext`.
 
-## Parser (`src/parser/xml.ts`)
+- **Who may connect:** only `chrome-extension://` origins that send the pairing code in their
+  first `hello` frame. After 10 wrong codes it refuses connections until restart.
+- **One connection at a time:** a reconnect from the same `instanceId` replaces the old one;
+  another browser is refused while the first still answers pings.
+- **Untrusted input:** every frame is parsed and shape-checked; malformed frames are refused
+  (handshake) or ignored (afterwards), never fatal.
+- **Diagnostics:** it records `lastRejection`, so the Control Center can say "wrong pairing code".
+- **Calls:** `call(op, params, {onChunk, signal, timeoutMs})` matches each request to its reply
+  frames, and sends `cancel` on abort or timeout. `waitUntil()` waits for a condition (such as
+  "connected" or "logged in") with a timeout and an abort signal.
+- **Status:** it caches the extension's last reported status and emits
+  `connected` / `disconnected` / `status`.
+- **Key reset:** `setPairingToken()` switches codes and makes the connected extension pair again.
 
-**Role:** extracts `<tool_use><tool_name>...</tool_name><parameters>...</parameters></tool_use>`
-blocks out of raw assistant text. Pure function, no side effects, no dependencies on other
-modules.
+**`queue.ts`**: `SendQueue` runs `send` operations one at a time, in arrival order.
 
-## Tools (`src/tools/`)
+- **Expired login:** on `AUTH_INVALID` it holds that request, and everything behind it, until the
+  extension reports `loggedIn: true`, then retries. It gives up after `authWaitMs`.
+- **Missing extension:** it waits up to `connectWaitMs` for the extension to (re)connect.
+- **No duplicate output:** once text has reached the client, it never retries.
 
-**`fs.ts`, `diff.ts`, `shell.ts`** — the actual primitives an agent run can invoke: read/write/
-list files, apply a unified-diff or search/replace patch, run a shell command. Each validates
-its own inputs and returns a typed success/error result rather than throwing, so a bad tool
-call degrades to an error result instead of crashing the loop. `shell.ts` refuses commands
-matching a small destructive-pattern denylist unless the caller explicitly confirms.
+Operations other than `send` skip the queue.
 
-**`registry.ts`** — the only place that maps a parsed `ToolUse` to one of the primitives above.
-Adding a new tool means adding one case here and one new primitive module; nothing else needs
-to change.
+### HTTP layer (`packages/helper/src/http/`)
 
-**Boundary rule:** primitives never call each other or the registry — only the registry calls
-primitives.
+**`server.ts`**: routing and security checks, in this order:
 
-## Persistence (`src/db/sqlite.ts`)
+1. The Host header must be a loopback name.
+2. Any `Origin` header must be the app's own origin (the Control Center) or in `allowedOrigins`.
+3. `/health`, the Control Center files and `/ui/*` (with its own token check) are open.
+4. Everything else needs the API key.
 
-**Role:** stores conversation/message history for `orchestrator/loop.ts`. Uses `better-sqlite3`
-if it happens to be installed, otherwise transparently falls back to a JSON file — callers
-never need to know which backend is active.
+It also handles WebSocket upgrades for `ExtensionLink`.
 
-**Boundary rule:** the only consumer is `orchestrator/loop.ts`; the API server and transport
-have no persistence of their own.
+**`context.ts`**: `Ctx` (what every handler gets: config, app hooks, link, queue, in-flight map)
+and `AppHooks`.
 
-## Configuration (`src/config/paths.ts`)
+**`io.ts`**: request/response plumbing: JSON bodies (20 MB cap, objects only), `sendError()`
+(maps error codes to HTTP status and adds `Retry-After`), client-disconnect aborts, and
+`LazySse`, an SSE response whose headers go out with the first event, so a failure before any
+text still gets a proper HTTP status.
 
-**Role:** the single source of truth for every path under `~/.claude-free-bridge/` (auth file,
-profile directories, known-orgs cache, db file, log file). Every other module imports paths
-from here rather than constructing them independently.
+**`models.ts`**: the `claude-web` default model, the model list, and which requested models
+pass through to claude.ai (only those allowed in the extension's settings).
 
-## Logger (`src/logger.ts`)
+**`openai.ts`, `anthropic.ts`**: validate each API's request and convert between its request,
+response, error and SSE formats and a `SendParams` with `source: 'api'`.
 
-**Role:** structured console logging plus optional file logging (toggled via the `telemetry`
-CLI command or `CLAUDE_FB_TELEMETRY=1`). Used for internal diagnostics; CLI user-facing output
-still goes through `console.log`/`console.error` directly, since that's a different concern
-(operator communication vs. diagnostic trace).
+**`prompt.ts`**: flattens system text and message history into one prompt for a new
+claude.ai chat, names that chat `API · …`, and estimates token counts.
 
-## Desktop GUI (`claude_bridge_gui.py`)
+**`bridge.ts`**: the `/bridge/*` endpoints for real claude.ai chats, plus the in-flight map
+of request ids that `/bridge/cancel/:id` uses.
 
-**Role:** a PyQt5 panel that wraps the CLI commands above (build, authenticate via a real browser
-login window, or import a session from an already-logged-in browser's cookie DB or by pasting a
-cookie, switch/remove saved accounts, start/stop the server, run a probe, smoke-test the chat
-API, run the integration suite) so they can be triggered with a click instead of a terminal.
+**`ui.ts`**: serves the embedded Control Center (`/`, `/ui.js`, `/ui.css`) with a strict
+Content-Security-Policy that forbids framing. It also serves the Control Center's private API,
+which only answers requests whose `x-cfb-ui` header matches `uiToken`:
 
-**Boundaries:** it shells out to the same `dist/index.js` CLI everything else uses — it holds
-no bridge logic of its own, only process management and log display.
+- `GET /ui/session`: version, API key, pairing code, API URL, extension folder;
+- `POST /ui/open-extension-folder` (through the `openFolder` app hook);
+- `POST /ui/reset-keys`: new API key and pairing code, saved, and the extension made to pair again;
+- `POST /ui/quit`.
 
-## Integration runner (`integration-runner.js`)
+**Boundary rules:**
 
-**Role:** end-to-end smoke test. Starts the built server, waits for `/health`, and — if a
-stored session exists — exercises both a non-streaming and a streaming `/v1/chat/completions`
-call against the real transport.
+- The app never handles claude.ai cookies or URLs; everything about claude.ai happens in the extension.
+- HTTP handlers reach the extension only through `SendQueue` (for `send`) or `ExtensionLink`
+  (for everything else).
+- HTTP handlers don't touch the desktop directly; they go through `AppHooks`.
+- Only `http/ui.ts` reveals secrets, and only to holders of the `uiToken`.
+
+## Control Center (`packages/helper/ui/`)
+
+**Role:** the window users work in. The app opens it as `/#ui=<uiToken>`. The page keeps the
+token in `sessionStorage` and removes it from the address bar. Without a valid token it shows
+a locked screen. It has three tabs:
+
+- **Setup** (`main.ts`): three steps, ticked off by polling `/bridge/status` every 3 s:
+  1. Add the extension (shows the folder, with Copy and Open buttons).
+  2. Paste the pairing code. Done once the extension is connected; warns on `lastRejection`.
+  3. Log in to claude.ai.
+
+  When everything is done, it switches to the Playground the first time it loads.
+- **Use with your apps** (`apps.ts`): API key (masked, Show/Copy), base URLs, model, copy-ready
+  examples with the real key, and **Reset keys**.
+- **Playground** (`playground.ts`): chat through the OpenAI / Anthropic / Bridge APIs with
+  streaming, Stop, chat list (Bridge mode) and the raw HTTP of each request.
+  `playgroundApi.ts` holds the per-API request and response formats, as pure functions.
+
+The top bar shows live status and a **Quit** button. If the app stops responding, a banner
+says so. `session.ts` holds the shared state (session, `uiToken`) and the fetch helpers;
+`dom.ts` holds the small DOM helpers (element lookup, toast, copy, masking).
+
+**Boundaries:** the Control Center is a client of the public HTTP API (with the session's API
+key) plus `/ui/*`. It imports from `shared/` (types and the SSE reader), never app code.
+
+## Extension (`packages/extension/src/`)
+
+**`background.ts`**: the service worker and the extension's coordinator. Its `runJob` handles
+every operation, whether it comes from the app or the side panel:
+
+1. checks the `sessionKey` cookie;
+2. gets the worker tab and picks the org;
+3. runs the operation in the tab's content script (`tabRunner.ts`);
+4. logs it to the activity list.
+
+It also:
+
+- tracks claude.ai login from cookie changes, content-script start-ups and auth failures;
+- pushes `status` to the app and keeps the toolbar badge up to date;
+- serves the side panel over a port;
+- opens the panel as a welcome tab on first install, and as a tab in browsers without a side panel.
+
+**`tabRunner.ts`**: `runInTab()` sends one operation to a tab's content script over a
+`chrome.tabs.connect` port, streams chunks back, and disconnects the port on abort (which
+aborts the fetch in the tab).
+
+**`helperLink.ts`**: the extension's end of the WebSocket.
+
+- **Handshake:** a `hello` with the pairing code.
+- **Keepalive:** a `ping` every 20 s (WebSocket traffic keeps an MV3 service worker alive in
+  Chromium 116+), reconnects with backoff, and a `chrome.alarms` check every 30 s.
+- **Refused codes:** if the app refuses a pairing code (wrong code, version mismatch, too many
+  attempts), it saves that in `store.refused` and doesn't retry it automatically, so it can't
+  trip the app's lockout. A new code, or the user clicking Connect, clears this.
+- **Busy app:** if another browser is connected, it retries slowly.
+
+**`workerTab.ts`**: finds an open claude.ai tab, or opens a pinned background tab, and waits
+for it to load. It marks the tab so the browser won't unload it, and injects the content script
+into tabs opened before the extension was installed. Concurrent callers share one lookup.
+
+**`content.ts`**: runs in claude.ai tabs. It receives jobs on a port, runs them through
+`claude/`, posts back chunks and a result, and aborts the fetch if the port closes.
+
+**`claude/`**: **the only code that knows claude.ai's internal endpoints and response
+formats.** Its requests are same-origin fetches from the page, so they carry the page's
+cookies. When claude.ai changes its API, this is the folder to fix.
+
+- `http.ts`: the request helper, and mapping claude.ai's HTTP errors to protocol error codes;
+- `account.ts`: the account, its organizations and plans;
+- `conversations.ts`: listing, reading (current branch of the message tree), creating and deleting chats;
+- `completion.ts`: sending a message and parsing the completion stream (the current
+  `content_block_delta` format and the older `completion` format, including stream errors).
+
+**`store.ts`**: saved state.
+
+- `chrome.storage.local`: the connection (app address, pairing code, `instanceId`, `refused`) and settings.
+- `chrome.storage.session`: the cached login/account, activity log and worker tab id.
+
+**`sidepanel/`**: the side panel UI:
+
+- a **Connect to the app** card until the extension is paired, or after a wrong code;
+- status (app, claude.ai, requests), Test chat, Settings and Activity;
+- **Advanced** (app address, new pairing code, disconnect).
+
+It talks only to `background.ts` over the `cfb-panel` port and holds no logic of its own.
+
+**`messages.ts`**: types for messages inside the extension (service worker ↔ content script,
+service worker ↔ side panel).
+
+**Boundary rules:** only `claude/` builds claude.ai API requests, and only the content
+script runs them. Only `background.ts` decides login state. The side panel never calls Chrome
+APIs that change state; it sends commands.
+
+## Tests
+
+- `packages/helper/test/helper.test.mjs`: the real app (HTTP + WebSocket) against a
+  `FakeExtension` that implements the extension's side of the protocol. Covers:
+  - access control: keys, origins, Host header, pairing, the second-browser rule, and malformed frames;
+  - both compatible APIs, streaming and non-streaming;
+  - queue order, holding requests until login, and cancellation;
+  - the bridge endpoints;
+  - the Control Center's token-gated `/ui/*`, including key reset;
+  - the settings file: first-run creation, and broken files left untouched (runs the built CLI).
+- `packages/extension/test/completion.test.mjs`: the claude.ai completion-stream parser,
+  bundled on the fly.
+
+`npm test` builds and runs both. Nothing in the test suite touches a real browser or claude.ai.
+`npm run release` runs them again before packaging.

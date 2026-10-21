@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Claude Free Bridge</title>
+    <link rel="stylesheet" href="sidepanel.css" />
+  </head>
+  <body>
+    <header>
+      <img src="icons/icon32.png" alt="" width="20" height="20" />
+      <h1>Claude Free Bridge</h1>
+      <span id="version" class="muted"></span>
+    </header>
+
+    <p id="tab-tip" class="tip" hidden>
+      Tip: pin this extension (puzzle-piece icon → pin), then click its icon to open this panel next to any page.
+    </p>
+
+    <!-- Shown until the extension is paired with the app -->
+    <section class="card onboarding" id="pair-card" hidden>
+      <h2>Connect to the app</h2>
+      <ol>
+        <li>Start the <b>Claude Free Bridge</b> app on your computer.</li>
+        <li>In its window, click <b>Copy pairing code</b>.</li>
+        <li>Paste it here and click <b>Connect</b>.</li>
+      </ol>
+      <label for="pair-input" class="visually-hidden">Pairing code</label>
+      <div class="pair-row">
+        <input id="pair-input" type="text" spellcheck="false" autocomplete="off" placeholder="Paste the pairing code (cfbpair-…)" />
+        <button id="pair-connect" class="primary">Connect</button>
+      </div>
+      <p id="pair-error" class="error-text" hidden></p>
+    </section>
+
+    <section class="card" id="status-card" aria-label="Status">
+      <div class="row">
+        <span class="dot" id="helper-dot"></span>
+        <div class="grow">
+          <div class="label">Claude Free Bridge app</div>
+          <div id="helper-text" class="sub"></div>
+        </div>
+        <button id="reconnect" class="small" hidden>Connect</button>
+      </div>
+      <div class="row">
+        <span class="dot" id="login-dot"></span>
+        <div class="grow">
+          <div class="label">claude.ai</div>
+          <div id="login-text" class="sub"></div>
+        </div>
+        <button id="open-claude" class="small" hidden>Log in</button>
+        <button id="refresh-account" class="small ghost" title="Read the account again from claude.ai">Refresh</button>
+      </div>
+      <div class="row">
+        <span class="dot" id="jobs-dot"></span>
+        <div class="grow">
+          <div class="label">Requests</div>
+          <div id="jobs-text" class="sub"></div>
+        </div>
+      </div>
+    </section>
+
+    <details class="card" id="test-card">
+      <summary>Test chat</summary>
+      <textarea id="test-input" rows="3" placeholder="Send a message to claude.ai through the bridge…"></textarea>
+      <label class="check"><input type="checkbox" id="test-continue" /> Continue the last test chat</label>
+      <div class="buttons">
+        <button id="test-send" class="primary">Send</button>
+        <button id="test-stop" hidden>Stop</button>
+        <a id="test-link" target="_blank" rel="noreferrer" hidden>Open in claude.ai</a>
+      </div>
+      <pre id="test-output" hidden></pre>
+    </details>
+
+    <details class="card">
+      <summary>Settings</summary>
+      <fieldset>
+        <legend>Chats started by your apps</legend>
+        <label class="check"><input type="radio" name="api-chats" value="keep" /> Keep them in my claude.ai history</label>
+        <label class="check"><input type="radio" name="api-chats" value="delete" /> Delete each one after the reply</label>
+      </fieldset>
+      <label>
+        Organization
+        <select id="org">
+          <option value="">Automatic (last used on claude.ai)</option>
+        </select>
+      </label>
+      <label>
+        Allowed models
+        <textarea id="models" rows="3" spellcheck="false" placeholder="One claude.ai model id per line"></textarea>
+      </label>
+      <p class="hint">Apps that ask for one of these models get it. Any other model name uses your account's default model.</p>
+      <div class="buttons">
+        <button id="save-settings" class="primary">Save</button>
+        <span id="settings-saved" class="muted" hidden>Saved</span>
+      </div>
+    </details>
+
+    <details class="card" id="activity-card">
+      <summary>Activity</summary>
+      <ul id="activity"></ul>
+      <p id="activity-empty" class="hint">No requests yet.</p>
+      <div class="buttons"><button id="clear-activity" class="small">Clear</button></div>
+    </details>
+
+    <details class="card" id="advanced-card">
+      <summary>Advanced</summary>
+      <label>
+        App address
+        <input id="helper-url" type="text" spellcheck="false" autocomplete="off" />
+      </label>
+      <p class="hint">Only change this if you changed the app's port.</p>
+      <label>
+        New pairing code
+        <input id="pairing-token" type="password" spellcheck="false" autocomplete="off" placeholder="Leave empty to keep the current one" />
+      </label>
+      <div class="buttons">
+        <button id="connect" class="primary">Save and connect</button>
+        <button id="disconnect">Disconnect</button>
+      </div>
+    </details>
+
+    <script src="sidepanel.js"></script>
+  </body>
+</html>
