@@ -4,6 +4,8 @@ Use your **claude.ai** account from apps and scripts on your computer, through a
 OpenAI- or Anthropic-compatible API. It's a small desktop app plus a browser extension for
 **Microsoft Edge, Brave, Chrome** and other Chromium browsers.
 
+![Header_Graphics](thumbnail.png)
+
 ```text
  your app ──API──▶ Claude Free Bridge app ──▶ browser extension ──▶ claude.ai (your logged-in account)
 ```
